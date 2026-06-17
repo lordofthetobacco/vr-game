@@ -4,5 +4,5 @@ model = "/Users/fcieslar/Downloads/luke-skywalkers-lightsaber/source/luke.fbx"
 [textures]
 base = "/Users/fcieslar/Downloads/luke-skywalkers-lightsaber/textures/LSWBase2.png"     # albedo / diffuse
 normal = "/Users/fcieslar/Downloads/luke-skywalkers-lightsaber/textures/LSWNormals.png"       # normal map
-roughness = "/Users/fcieslar/Downloads/luke-skywalkers-lightsaber/textures/LSAWMetallic.png" # roughness map
-metallic = "/Users/fcieslar/Downloads/luke-skywalkers-lightsaber/textures/LSWRoughness.png"   # metallic map
+roughness = "/Users/fcieslar/Downloads/luke-skywalkers-lightsaber/textures/LSWRoughness.png" # roughness map
+metallic = "/Users/fcieslar/Downloads/luke-skywalkers-lightsaber/textures/LSAWMetallic.png"   # metallic map

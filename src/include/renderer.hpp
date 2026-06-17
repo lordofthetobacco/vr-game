@@ -34,8 +34,16 @@ public:
     Renderer &operator=(const Renderer &) = delete;
 
     // Upload the mesh + textures and wire up descriptors. Call once before the
-    // first drawFrame.
+    // first drawFrame. The position-dequantization bbox is computed from this
+    // (full-resolution) model and reused for any later updateMesh() calls.
     void uploadObject(const Model &model, const TextureSet &textures);
+
+    // Replace just the vertex/index buffers (e.g. after LOD simplification).
+    // Textures, descriptors and the quantization bbox are left unchanged.
+    void updateMesh(const Model &model);
+
+    // Number of indices currently uploaded (for UI readouts).
+    uint32_t getIndexCount() const { return indexCount; }
 
     // Render one frame with the given camera matrices, light direction, and
     // camera world position.
@@ -44,6 +52,10 @@ public:
 
     // Mark the swapchain as needing recreation (window resized).
     void onResize() { framebufferResized = true; }
+
+    VkSampleCountFlagBits getMsaaSamples() const { return msaaSamples; }
+    VkSampleCountFlagBits getMaxMsaaSamples() const;
+    void setMsaaSamples(VkSampleCountFlagBits samples);
 
 private:
     static constexpr int MAX_FRAMES_IN_FLIGHT = 2;
@@ -54,6 +66,8 @@ private:
         glm::mat4 proj;
         glm::vec4 lightDir;
         glm::vec4 camPos;
+        glm::vec4 quantMin;    // xyz: bbox min for position dequantization
+        glm::vec4 quantExtent; // xyz: bbox extent (max - min)
     };
 
     struct Texture {
@@ -70,6 +84,7 @@ private:
     void createLogicalDevice();
     void createSwapchain();
     void createImageViews();
+    void createMsaaColorResources();
     void createDepthResources();
     void createRenderPass();
     void createDescriptorSetLayout();
@@ -81,6 +96,7 @@ private:
     void createDescriptorPool();
     void createCommandBuffers();
     void createSyncObjects();
+    void initImGui();
 
     void recreateSwapchain();
     void cleanupSwapchain();
@@ -88,6 +104,10 @@ private:
     void updateUniformBuffer(uint32_t frame, const glm::mat4 &view,
                              const glm::mat4 &proj, const glm::vec3 &lightDir,
                              const glm::vec3 &camPos);
+
+    // Quantize `model` into PackedVertex form and (re)create the vertex/index
+    // buffers, destroying any existing ones first. Sets indexCount.
+    void createMeshBuffers(const Model &model);
 
     // --- buffer / command helpers ---
     uint32_t findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags props);
@@ -103,7 +123,8 @@ private:
     void createImage(uint32_t width, uint32_t height, uint32_t mipLevels,
                      VkFormat format, VkImageTiling tiling,
                      VkImageUsageFlags usage, VkMemoryPropertyFlags props,
-                     VkImage &image, VkDeviceMemory &memory);
+                     VkImage &image, VkDeviceMemory &memory,
+                     VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT);
     VkImageView createImageView(VkImage image, VkFormat format,
                                 VkImageAspectFlags aspect, uint32_t mipLevels);
     void transitionImageLayout(VkImage image, VkImageLayout oldLayout,
@@ -157,9 +178,18 @@ private:
     VkDeviceMemory indexBufferMemory = VK_NULL_HANDLE;
     uint32_t indexCount = 0;
 
+    // Position-dequantization bbox, computed once from the full-res model.
+    glm::vec3 quantMin{0.0f};
+    glm::vec3 quantExtent{1.0f};
+
     // PBR textures: [0]=base, [1]=normal, [2]=roughness, [3]=metallic.
     Texture pbrTextures[4];
     VkSampler textureSampler = VK_NULL_HANDLE;
+
+    VkSampleCountFlagBits msaaSamples = VK_SAMPLE_COUNT_1_BIT;
+    Texture msaaColor;
+
+    bool imguiInitialized = false;
 
     std::vector<VkBuffer> uniformBuffers;
     std::vector<VkDeviceMemory> uniformBuffersMemory;

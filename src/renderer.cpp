@@ -6,12 +6,19 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <limits>
 #include <set>
 #include <stdexcept>
 #include <string>
 
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_vulkan.h>
+
+#include <imgui.h>
+#include <imgui_impl_sdl3.h>
+#include <imgui_impl_vulkan.h>
+
+#include <meshoptimizer.h>
 
 #include "include/io.hpp"
 #include "third_party/stb_image.h"
@@ -41,6 +48,41 @@ bool validationLayerAvailable() {
     return false;
 }
 
+// GPU vertex layout after 16-bit/8-bit quantization. 20 bytes vs 48 for the
+// in-memory float Vertex. Decoded for free by Vulkan vertex fetch; position is
+// dequantized in the vertex shader using the UBO bbox.
+struct PackedVertex {
+    uint16_t pos[4];     // R16G16B16A16_UNORM (bbox-normalized; w unused)
+    int8_t normal[4];    // R8G8B8A8_SNORM (w unused)
+    int8_t tangent[4];   // R8G8B8A8_SNORM (xyz tangent, w = handedness sign)
+    uint16_t uv[2];      // R16G16_SFLOAT
+};
+
+VkSampleCountFlagBits getMaxSampleCount(VkPhysicalDevice dev,
+                                        VkFormat colorFormat) {
+    VkPhysicalDeviceProperties props;
+    vkGetPhysicalDeviceProperties(dev, &props);
+
+    VkSampleCountFlags counts = props.limits.framebufferColorSampleCounts &
+                                props.limits.framebufferDepthSampleCounts;
+
+    // Intersect with what the specific color format actually supports as a
+    // multisampled attachment — device limits alone don't account for this.
+    VkImageFormatProperties fmtProps{};
+    if (vkGetPhysicalDeviceImageFormatProperties(
+            dev, colorFormat, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL,
+            VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT |
+                VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+            0, &fmtProps) == VK_SUCCESS) {
+        counts &= fmtProps.sampleCounts;
+    }
+
+    for (auto c : {VK_SAMPLE_COUNT_8_BIT, VK_SAMPLE_COUNT_4_BIT,
+                   VK_SAMPLE_COUNT_2_BIT})
+        if (counts & c) return c;
+    return VK_SAMPLE_COUNT_1_BIT;
+}
+
 } // namespace
 
 Renderer::Renderer(SDL_Window *window) : window(window) {
@@ -49,7 +91,9 @@ Renderer::Renderer(SDL_Window *window) : window(window) {
     pickPhysicalDevice();
     createLogicalDevice();
     createSwapchain();
+    msaaSamples = getMaxSampleCount(physicalDevice, swapchainFormat);
     createImageViews();
+    createMsaaColorResources();
     createDepthResources();
     createRenderPass();
     createDescriptorSetLayout();
@@ -61,11 +105,19 @@ Renderer::Renderer(SDL_Window *window) : window(window) {
     createDescriptorPool();
     createCommandBuffers();
     createSyncObjects();
+    initImGui();
 }
 
 Renderer::~Renderer() {
     if (device != VK_NULL_HANDLE) {
         vkDeviceWaitIdle(device);
+    }
+
+    if (imguiInitialized) {
+        ImGui_ImplVulkan_Shutdown();
+        ImGui_ImplSDL3_Shutdown();
+        ImGui::DestroyContext();
+        imguiInitialized = false;
     }
 
     cleanupSwapchain();
@@ -351,7 +403,8 @@ void Renderer::createImage(uint32_t width, uint32_t height, uint32_t mipLevels,
                            VkFormat format, VkImageTiling tiling,
                            VkImageUsageFlags usage,
                            VkMemoryPropertyFlags props, VkImage &image,
-                           VkDeviceMemory &memory) {
+                           VkDeviceMemory &memory,
+                           VkSampleCountFlagBits samples) {
     VkImageCreateInfo imageInfo{};
     imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     imageInfo.imageType = VK_IMAGE_TYPE_2D;
@@ -364,7 +417,7 @@ void Renderer::createImage(uint32_t width, uint32_t height, uint32_t mipLevels,
     imageInfo.tiling = tiling;
     imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     imageInfo.usage = usage;
-    imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+    imageInfo.samples = samples;
     imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
     vkCheck(vkCreateImage(device, &imageInfo, nullptr, &image),
@@ -382,30 +435,44 @@ void Renderer::createImage(uint32_t width, uint32_t height, uint32_t mipLevels,
     vkBindImageMemory(device, image, memory, 0);
 }
 
+void Renderer::createMsaaColorResources() {
+    createImage(swapchainExtent.width, swapchainExtent.height, 1,
+                swapchainFormat, VK_IMAGE_TILING_OPTIMAL,
+                VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT |
+                    VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, msaaColor.image,
+                msaaColor.memory, msaaSamples);
+    msaaColor.view = createImageView(msaaColor.image, swapchainFormat,
+                                     VK_IMAGE_ASPECT_COLOR_BIT, 1);
+    msaaColor.mipLevels = 1;
+}
+
 void Renderer::createDepthResources() {
     createImage(swapchainExtent.width, swapchainExtent.height, 1, depthFormat,
                 VK_IMAGE_TILING_OPTIMAL,
                 VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
                 VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, depthImage,
-                depthImageMemory);
+                depthImageMemory, msaaSamples);
     depthImageView =
         createImageView(depthImage, depthFormat, VK_IMAGE_ASPECT_DEPTH_BIT, 1);
 }
 
 void Renderer::createRenderPass() {
+    // Attachment 0: MSAA color (multisampled, not directly presentable)
     VkAttachmentDescription colorAttachment{};
     colorAttachment.format = swapchainFormat;
-    colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+    colorAttachment.samples = msaaSamples;
     colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
     colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
     colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
     colorAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    colorAttachment.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    colorAttachment.finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
+    // Attachment 1: MSAA depth
     VkAttachmentDescription depthAttachment{};
     depthAttachment.format = depthFormat;
-    depthAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+    depthAttachment.samples = msaaSamples;
     depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
     depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
     depthAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
@@ -413,6 +480,17 @@ void Renderer::createRenderPass() {
     depthAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     depthAttachment.finalLayout =
         VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+    // Attachment 2: Resolve target (single-sample swapchain image)
+    VkAttachmentDescription resolveAttachment{};
+    resolveAttachment.format = swapchainFormat;
+    resolveAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+    resolveAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    resolveAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    resolveAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    resolveAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    resolveAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    resolveAttachment.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
 
     VkAttachmentReference colorRef{};
     colorRef.attachment = 0;
@@ -422,11 +500,16 @@ void Renderer::createRenderPass() {
     depthRef.attachment = 1;
     depthRef.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
+    VkAttachmentReference resolveRef{};
+    resolveRef.attachment = 2;
+    resolveRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
     VkSubpassDescription subpass{};
     subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
     subpass.colorAttachmentCount = 1;
     subpass.pColorAttachments = &colorRef;
     subpass.pDepthStencilAttachment = &depthRef;
+    subpass.pResolveAttachments = &resolveRef;
 
     VkSubpassDependency dependency{};
     dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
@@ -442,8 +525,8 @@ void Renderer::createRenderPass() {
         VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
         VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
 
-    std::array<VkAttachmentDescription, 2> attachments = {colorAttachment,
-                                                          depthAttachment};
+    std::array<VkAttachmentDescription, 3> attachments = {
+        colorAttachment, depthAttachment, resolveAttachment};
     VkRenderPassCreateInfo info{};
     info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
     info.attachmentCount = static_cast<uint32_t>(attachments.size());
@@ -525,26 +608,27 @@ void Renderer::createGraphicsPipeline() {
 
     VkVertexInputBindingDescription binding{};
     binding.binding = 0;
-    binding.stride = sizeof(Vertex);
+    binding.stride = sizeof(PackedVertex);
     binding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
 
+    // Quantized formats; Vulkan converts unorm/snorm/half to float at fetch.
     std::array<VkVertexInputAttributeDescription, 4> attrs{};
     attrs[0].location = 0;
     attrs[0].binding = 0;
-    attrs[0].format = VK_FORMAT_R32G32B32_SFLOAT;
-    attrs[0].offset = offsetof(Vertex, pos);
+    attrs[0].format = VK_FORMAT_R16G16B16A16_UNORM;
+    attrs[0].offset = offsetof(PackedVertex, pos);
     attrs[1].location = 1;
     attrs[1].binding = 0;
-    attrs[1].format = VK_FORMAT_R32G32B32_SFLOAT;
-    attrs[1].offset = offsetof(Vertex, normal);
+    attrs[1].format = VK_FORMAT_R8G8B8A8_SNORM;
+    attrs[1].offset = offsetof(PackedVertex, normal);
     attrs[2].location = 2;
     attrs[2].binding = 0;
-    attrs[2].format = VK_FORMAT_R32G32B32A32_SFLOAT;
-    attrs[2].offset = offsetof(Vertex, tangent);
+    attrs[2].format = VK_FORMAT_R8G8B8A8_SNORM;
+    attrs[2].offset = offsetof(PackedVertex, tangent);
     attrs[3].location = 3;
     attrs[3].binding = 0;
-    attrs[3].format = VK_FORMAT_R32G32_SFLOAT;
-    attrs[3].offset = offsetof(Vertex, uv);
+    attrs[3].format = VK_FORMAT_R16G16_SFLOAT;
+    attrs[3].offset = offsetof(PackedVertex, uv);
 
     VkPipelineVertexInputStateCreateInfo vertexInput{};
     vertexInput.sType =
@@ -580,7 +664,7 @@ void Renderer::createGraphicsPipeline() {
     VkPipelineMultisampleStateCreateInfo multisample{};
     multisample.sType =
         VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
-    multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+    multisample.rasterizationSamples = msaaSamples;
 
     VkPipelineDepthStencilStateCreateInfo depthStencil{};
     depthStencil.sType =
@@ -643,8 +727,8 @@ void Renderer::createGraphicsPipeline() {
 void Renderer::createFramebuffers() {
     framebuffers.resize(swapchainImageViews.size());
     for (size_t i = 0; i < swapchainImageViews.size(); ++i) {
-        std::array<VkImageView, 2> attachments = {swapchainImageViews[i],
-                                                  depthImageView};
+        std::array<VkImageView, 3> attachments = {
+            msaaColor.view, depthImageView, swapchainImageViews[i]};
         VkFramebufferCreateInfo info{};
         info.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
         info.renderPass = renderPass;
@@ -993,14 +1077,55 @@ void Renderer::createTextureSampler() {
             "vkCreateSampler");
 }
 
-void Renderer::uploadObject(const Model &model, const TextureSet &textures) {
+void Renderer::createMeshBuffers(const Model &model) {
     const std::vector<Vertex> &vertices = model.vertices;
     const std::vector<uint32_t> &indices = model.indices;
     indexCount = static_cast<uint32_t>(indices.size());
 
+    // Destroy any previously-uploaded mesh (LOD change / re-upload).
+    if (vertexBuffer) vkDestroyBuffer(device, vertexBuffer, nullptr);
+    if (vertexBufferMemory) vkFreeMemory(device, vertexBufferMemory, nullptr);
+    if (indexBuffer) vkDestroyBuffer(device, indexBuffer, nullptr);
+    if (indexBufferMemory) vkFreeMemory(device, indexBufferMemory, nullptr);
+    vertexBuffer = VK_NULL_HANDLE;
+    vertexBufferMemory = VK_NULL_HANDLE;
+    indexBuffer = VK_NULL_HANDLE;
+    indexBufferMemory = VK_NULL_HANDLE;
+
+    // Quantize float vertices into the compact PackedVertex layout. Position is
+    // normalized into the stored bbox so the shader can dequantize uniformly.
+    std::vector<PackedVertex> packed(vertices.size());
+    const glm::vec3 invExtent = {
+        quantExtent.x > 0.0f ? 1.0f / quantExtent.x : 0.0f,
+        quantExtent.y > 0.0f ? 1.0f / quantExtent.y : 0.0f,
+        quantExtent.z > 0.0f ? 1.0f / quantExtent.z : 0.0f};
+    for (size_t i = 0; i < vertices.size(); ++i) {
+        const Vertex &v = vertices[i];
+        PackedVertex &p = packed[i];
+
+        glm::vec3 n = (v.pos - quantMin) * invExtent; // -> [0,1]
+        p.pos[0] = static_cast<uint16_t>(meshopt_quantizeUnorm(n.x, 16));
+        p.pos[1] = static_cast<uint16_t>(meshopt_quantizeUnorm(n.y, 16));
+        p.pos[2] = static_cast<uint16_t>(meshopt_quantizeUnorm(n.z, 16));
+        p.pos[3] = 0;
+
+        p.normal[0] = static_cast<int8_t>(meshopt_quantizeSnorm(v.normal.x, 8));
+        p.normal[1] = static_cast<int8_t>(meshopt_quantizeSnorm(v.normal.y, 8));
+        p.normal[2] = static_cast<int8_t>(meshopt_quantizeSnorm(v.normal.z, 8));
+        p.normal[3] = 0;
+
+        p.tangent[0] = static_cast<int8_t>(meshopt_quantizeSnorm(v.tangent.x, 8));
+        p.tangent[1] = static_cast<int8_t>(meshopt_quantizeSnorm(v.tangent.y, 8));
+        p.tangent[2] = static_cast<int8_t>(meshopt_quantizeSnorm(v.tangent.z, 8));
+        p.tangent[3] = static_cast<int8_t>(meshopt_quantizeSnorm(v.tangent.w, 8));
+
+        p.uv[0] = meshopt_quantizeHalf(v.uv.x);
+        p.uv[1] = meshopt_quantizeHalf(v.uv.y);
+    }
+
     // Vertex buffer.
     {
-        VkDeviceSize size = sizeof(Vertex) * vertices.size();
+        VkDeviceSize size = sizeof(PackedVertex) * packed.size();
         VkBuffer staging;
         VkDeviceMemory stagingMem;
         createBuffer(size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
@@ -1009,7 +1134,7 @@ void Renderer::uploadObject(const Model &model, const TextureSet &textures) {
                      staging, stagingMem);
         void *data;
         vkMapMemory(device, stagingMem, 0, size, 0, &data);
-        std::memcpy(data, vertices.data(), static_cast<size_t>(size));
+        std::memcpy(data, packed.data(), static_cast<size_t>(size));
         vkUnmapMemory(device, stagingMem);
 
         createBuffer(size,
@@ -1047,6 +1172,34 @@ void Renderer::uploadObject(const Model &model, const TextureSet &textures) {
         vkDestroyBuffer(device, staging, nullptr);
         vkFreeMemory(device, stagingMem, nullptr);
     }
+}
+
+void Renderer::updateMesh(const Model &model) {
+    vkDeviceWaitIdle(device);
+    createMeshBuffers(model);
+}
+
+void Renderer::uploadObject(const Model &model, const TextureSet &textures) {
+    // Compute the position-dequantization bbox from this full-res model and
+    // keep it for all later updateMesh() calls (simplification never grows it).
+    glm::vec3 minB(std::numeric_limits<float>::max());
+    glm::vec3 maxB(std::numeric_limits<float>::lowest());
+    for (const Vertex &v : model.vertices) {
+        minB = glm::min(minB, v.pos);
+        maxB = glm::max(maxB, v.pos);
+    }
+    if (model.vertices.empty()) {
+        minB = glm::vec3(0.0f);
+        maxB = glm::vec3(1.0f);
+    }
+    quantMin = minB;
+    quantExtent = maxB - minB;
+    // Guard against a zero extent on any axis (flat meshes).
+    if (quantExtent.x <= 0.0f) quantExtent.x = 1.0f;
+    if (quantExtent.y <= 0.0f) quantExtent.y = 1.0f;
+    if (quantExtent.z <= 0.0f) quantExtent.z = 1.0f;
+
+    createMeshBuffers(model);
 
     // PBR textures. base is sRGB (color); the others are linear data. Empty
     // paths fall back to neutral 1x1 constants so plain models still render.
@@ -1191,6 +1344,8 @@ void Renderer::cleanupSwapchain() {
     for (auto fb : framebuffers) vkDestroyFramebuffer(device, fb, nullptr);
     framebuffers.clear();
 
+    destroyTexture(msaaColor);
+
     if (depthImageView) vkDestroyImageView(device, depthImageView, nullptr);
     if (depthImage) vkDestroyImage(device, depthImage, nullptr);
     if (depthImageMemory) vkFreeMemory(device, depthImageMemory, nullptr);
@@ -1220,8 +1375,14 @@ void Renderer::recreateSwapchain() {
 
     createSwapchain();
     createImageViews();
+    createMsaaColorResources();
     createDepthResources();
     createFramebuffers();
+
+    if (imguiInitialized) {
+        ImGui_ImplVulkan_SetMinImageCount(
+            static_cast<uint32_t>(swapchainImages.size()));
+    }
 
     // Number of swapchain images can change; resize render-finished semaphores.
     for (auto s : renderFinishedSemaphores)
@@ -1246,6 +1407,8 @@ void Renderer::updateUniformBuffer(uint32_t frame, const glm::mat4 &view,
     ubo.proj = proj;
     ubo.lightDir = glm::vec4(lightDir, 0.0f);
     ubo.camPos = glm::vec4(camPos, 1.0f);
+    ubo.quantMin = glm::vec4(quantMin, 0.0f);
+    ubo.quantExtent = glm::vec4(quantExtent, 0.0f);
     std::memcpy(uniformBuffersMapped[frame], &ubo, sizeof(ubo));
 }
 
@@ -1254,7 +1417,8 @@ void Renderer::recordCommandBuffer(VkCommandBuffer cmd, uint32_t imageIndex) {
     begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     vkCheck(vkBeginCommandBuffer(cmd, &begin), "vkBeginCommandBuffer");
 
-    std::array<VkClearValue, 2> clears{};
+    // 3 clear values: MSAA color, depth, resolve (resolve loadOp=DONT_CARE so value is ignored)
+    std::array<VkClearValue, 3> clears{};
     clears[0].color = {{0.05f, 0.05f, 0.08f, 1.0f}};
     clears[1].depthStencil = {1.0f, 0};
 
@@ -1288,8 +1452,78 @@ void Renderer::recordCommandBuffer(VkCommandBuffer cmd, uint32_t imageIndex) {
                             0, nullptr);
     vkCmdDrawIndexed(cmd, indexCount, 1, 0, 0, 0);
 
+    if (ImDrawData *dd = ImGui::GetDrawData())
+        ImGui_ImplVulkan_RenderDrawData(dd, cmd);
+
     vkCmdEndRenderPass(cmd);
     vkCheck(vkEndCommandBuffer(cmd), "vkEndCommandBuffer");
+}
+
+VkSampleCountFlagBits Renderer::getMaxMsaaSamples() const {
+    return getMaxSampleCount(physicalDevice, swapchainFormat);
+}
+
+void Renderer::setMsaaSamples(VkSampleCountFlagBits samples) {
+    if (samples == msaaSamples) return;
+    msaaSamples = samples;
+
+    vkDeviceWaitIdle(device);
+
+    if (imguiInitialized) {
+        ImGui_ImplVulkan_Shutdown();
+        ImGui_ImplSDL3_Shutdown();
+        ImGui::DestroyContext();
+        imguiInitialized = false;
+    }
+
+    for (auto fb : framebuffers) vkDestroyFramebuffer(device, fb, nullptr);
+    framebuffers.clear();
+
+    destroyTexture(msaaColor);
+
+    if (depthImageView) vkDestroyImageView(device, depthImageView, nullptr);
+    if (depthImage) vkDestroyImage(device, depthImage, nullptr);
+    if (depthImageMemory) vkFreeMemory(device, depthImageMemory, nullptr);
+    depthImageView = VK_NULL_HANDLE;
+    depthImage = VK_NULL_HANDLE;
+    depthImageMemory = VK_NULL_HANDLE;
+
+    if (graphicsPipeline) vkDestroyPipeline(device, graphicsPipeline, nullptr);
+    if (pipelineLayout) vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
+    if (renderPass) vkDestroyRenderPass(device, renderPass, nullptr);
+    graphicsPipeline = VK_NULL_HANDLE;
+    pipelineLayout = VK_NULL_HANDLE;
+    renderPass = VK_NULL_HANDLE;
+
+    createMsaaColorResources();
+    createDepthResources();
+    createRenderPass();
+    createGraphicsPipeline();
+    createFramebuffers();
+    initImGui();
+}
+
+void Renderer::initImGui() {
+    ImGui::CreateContext();
+    ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+
+    ImGui_ImplSDL3_InitForVulkan(window);
+
+    ImGui_ImplVulkan_InitInfo initInfo{};
+    initInfo.ApiVersion          = VK_API_VERSION_1_3;
+    initInfo.Instance            = instance;
+    initInfo.PhysicalDevice      = physicalDevice;
+    initInfo.Device              = device;
+    initInfo.QueueFamily         = graphicsFamily;
+    initInfo.Queue               = graphicsQueue;
+    initInfo.DescriptorPoolSize  = 8; // ImGui manages its own pool internally (min 8)
+    initInfo.MinImageCount       = static_cast<uint32_t>(swapchainImages.size());
+    initInfo.ImageCount          = static_cast<uint32_t>(swapchainImages.size());
+    initInfo.PipelineInfoMain.RenderPass  = renderPass;
+    initInfo.PipelineInfoMain.MSAASamples = msaaSamples;
+    ImGui_ImplVulkan_Init(&initInfo);
+
+    imguiInitialized = true;
 }
 
 void Renderer::drawFrame(const glm::mat4 &view, const glm::mat4 &proj,

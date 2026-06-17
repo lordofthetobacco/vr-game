@@ -25,4 +25,10 @@ struct Model {
 // Loads an OBJ (or any assimp-supported) model. Returns false on failure.
 bool loadModel(const char *path, Model &out);
 
+// Produces a simplified + GPU-optimized copy of src into out. `ratio` (0,1] is
+// the fraction of indices to keep; `targetError` is the max relative geometric
+// error meshopt may introduce. Runs meshopt simplify + vertex-cache/fetch
+// optimization. out.center/out.radius are carried over from src.
+void simplifyModel(const Model &src, float ratio, float targetError, Model &out);
+
 #endif

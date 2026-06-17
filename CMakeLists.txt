@@ -32,6 +32,40 @@ else()
     message(FATAL_ERROR "Assimp not found")
 endif()
 
+# --- Dear ImGui (fetched from GitHub) ---
+include(FetchContent)
+FetchContent_Declare(
+    imgui
+    GIT_REPOSITORY https://github.com/ocornut/imgui.git
+    GIT_TAG        v1.92.8
+    GIT_SHALLOW    TRUE
+)
+FetchContent_MakeAvailable(imgui)
+
+add_library(imgui_lib STATIC
+    ${imgui_SOURCE_DIR}/imgui.cpp
+    ${imgui_SOURCE_DIR}/imgui_draw.cpp
+    ${imgui_SOURCE_DIR}/imgui_tables.cpp
+    ${imgui_SOURCE_DIR}/imgui_widgets.cpp
+    ${imgui_SOURCE_DIR}/backends/imgui_impl_sdl3.cpp
+    ${imgui_SOURCE_DIR}/backends/imgui_impl_vulkan.cpp
+)
+target_include_directories(imgui_lib PUBLIC
+    ${imgui_SOURCE_DIR}
+    ${imgui_SOURCE_DIR}/backends
+)
+target_link_libraries(imgui_lib PUBLIC SDL3::SDL3 Vulkan::Vulkan)
+target_compile_options(imgui_lib PRIVATE -w)
+
+# --- meshoptimizer (fetched from GitHub) ---
+FetchContent_Declare(
+    meshoptimizer
+    GIT_REPOSITORY https://github.com/zeux/meshoptimizer.git
+    GIT_TAG        v0.22
+    GIT_SHALLOW    TRUE
+)
+FetchContent_MakeAvailable(meshoptimizer)
+
 add_executable(ForceUnleashedVR
     src/main.cpp
     src/io.cpp
@@ -45,22 +79,25 @@ target_compile_options(ForceUnleashedVR PRIVATE
     "$<$<CXX_COMPILER_ID:Clang>:-Wall;-Wextra;-Wpedantic>"
 )
 target_include_directories(ForceUnleashedVR PRIVATE ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(ForceUnleashedVR PRIVATE SDL3::SDL3 Vulkan::Vulkan assimp::assimp)
+target_link_libraries(ForceUnleashedVR PRIVATE SDL3::SDL3 Vulkan::Vulkan assimp::assimp imgui_lib meshoptimizer)
 
 # stb_image is third-party single-header code: suppress its warnings.
 set_source_files_properties(src/stb_image_impl.cpp PROPERTIES COMPILE_OPTIONS "-w")
 
 # --- Shader compilation (GLSL -> SPIR-V) ---
-find_program(GLSLC NAMES glslc
-    HINTS
-        "$ENV{VULKAN_SDK}/bin"
-        "/home/fcieslar/Downloads/1.4.350.1/x86_64/bin"
+# Fetch and build the reference glslang compiler so no local Vulkan SDK install
+# is required. ENABLE_OPT=OFF keeps it self-contained (no SPIRV-Tools dependency).
+set(ENABLE_OPT OFF CACHE BOOL "" FORCE)
+set(GLSLANG_TESTS OFF CACHE BOOL "" FORCE)
+set(GLSLANG_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
+set(ENABLE_SPVREMAPPER OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(
+    glslang
+    GIT_REPOSITORY https://github.com/KhronosGroup/glslang.git
+    GIT_TAG        15.3.0
+    GIT_SHALLOW    TRUE
 )
-if(NOT GLSLC)
-    message(FATAL_ERROR
-        "glslc not found. Source the Vulkan SDK setup-env.sh or set VULKAN_SDK.")
-endif()
-message(STATUS "Found glslc: ${GLSLC}")
+FetchContent_MakeAvailable(glslang)
 
 set(SHADER_OUTPUT_DIR "${CMAKE_BINARY_DIR}/shaders")
 file(MAKE_DIRECTORY ${SHADER_OUTPUT_DIR})
@@ -76,8 +113,9 @@ foreach(SHADER ${SHADER_SOURCES})
     set(SPIRV "${SHADER_OUTPUT_DIR}/${SHADER_NAME}.spv")
     add_custom_command(
         OUTPUT ${SPIRV}
-        COMMAND ${GLSLC} ${SHADER} -o ${SPIRV}
-        DEPENDS ${SHADER}
+        # -V: emit a Vulkan SPIR-V binary (stage inferred from the extension).
+        COMMAND glslang-standalone -V ${SHADER} -o ${SPIRV}
+        DEPENDS ${SHADER} glslang-standalone
         COMMENT "Compiling shader ${SHADER_NAME}"
         VERBATIM
     )
