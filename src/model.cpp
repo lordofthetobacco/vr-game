@@ -49,7 +49,7 @@ bool loadModel(const char *path, Model &out) {
 
             if (mesh->HasTextureCoords(0)) {
                 vert.uv = {mesh->mTextureCoords[0][v].x,
-                           mesh->mTextureCoords[0][v].y};
+                           1.0f - mesh->mTextureCoords[0][v].y};
             } else {
                 vert.uv = {0.0f, 0.0f};
             }
