@@ -12,6 +12,8 @@
 #include "model.hpp"
 
 struct SDL_Window;
+class XrSystem;
+class PlayerRig;
 
 // The four metallic-roughness PBR maps for an object. Paths are loaded from
 // disk; if a path is empty the renderer substitutes a default constant texture.
@@ -27,7 +29,10 @@ struct TextureSet {
 // them down in the destructor.
 class Renderer {
 public:
-    explicit Renderer(SDL_Window *window);
+    // `xr` may be null (or an unavailable system) for desktop-only operation;
+    // when present, the Vulkan instance/device are created through OpenXR and an
+    // XR per-eye render path is set up.
+    explicit Renderer(SDL_Window *window, XrSystem *xr = nullptr);
     ~Renderer();
 
     Renderer(const Renderer &) = delete;
@@ -46,9 +51,23 @@ public:
     uint32_t getIndexCount() const { return indexCount; }
 
     // Render one frame with the given camera matrices, light direction, and
-    // camera world position.
+    // camera world position (desktop window / mirror).
     void drawFrame(const glm::mat4 &view, const glm::mat4 &proj,
                    const glm::vec3 &lightDir, const glm::vec3 &camPos);
+
+    // Render the stereo HMD frame through OpenXR (wait/begin/locate/2 eyes/end).
+    // After it returns, `lastEyeView`/`lastEyeProj`/`lastEyePos` hold the left
+    // eye's matrices so the caller can mirror them to the desktop window.
+    void renderXrFrame(XrSystem &xr, const PlayerRig &player,
+                       const glm::vec3 &lightDir);
+    glm::mat4 lastEyeView{1.0f};
+    glm::mat4 lastEyeProj{1.0f};
+    glm::vec3 lastEyePos{0.0f};
+
+    // World transform applied to the model (UBO.model). Defaults to identity.
+    void setObjectTransform(const glm::mat4 &m) { objectTransform = m; }
+
+    bool hasXr() const { return xr != nullptr; }
 
     // Mark the swapchain as needing recreation (window resized).
     void onResize() { framebufferResized = true; }
@@ -105,6 +124,18 @@ private:
                              const glm::mat4 &proj, const glm::vec3 &lightDir,
                              const glm::vec3 &camPos);
 
+    // Build a graphics pipeline (reusing pipelineLayout) for a given render pass
+    // + sample count. Shared by the desktop and XR paths.
+    VkPipeline buildPipeline(VkRenderPass rp, VkSampleCountFlagBits samples);
+
+    // --- XR setup / teardown (only when xr != nullptr) ---
+    void createXrRenderPass();
+    void createXrRenderTargets();  // per-eye MSAA + depth + image views + FBs
+    void destroyXrRenderTargets();
+    void createXrFrameResources();  // UBOs, descriptor sets, cmd buffers, fences
+    void recordXrCommandBuffer(VkCommandBuffer cmd, uint32_t eye,
+                               uint32_t imageIndex, VkDescriptorSet set);
+
     // Quantize `model` into PackedVertex form and (re)create the vertex/index
     // buffers, destroying any existing ones first. Sets indexCount.
     void createMeshBuffers(const Model &model);
@@ -141,6 +172,10 @@ private:
     void createDescriptorSets();
 
     SDL_Window *window = nullptr;
+    XrSystem *xr = nullptr;
+
+    // World transform for the single object (UBO.model).
+    glm::mat4 objectTransform{1.0f};
 
     VkInstance instance = VK_NULL_HANDLE;
     VkSurfaceKHR surface = VK_NULL_HANDLE;
@@ -205,6 +240,33 @@ private:
     uint32_t currentFrame = 0;
     bool framebufferResized = false;
     bool validationEnabled = false;
+
+    // --- XR per-eye rendering (only populated when xr != nullptr) ---
+    static constexpr uint32_t kEyeCount = 2;
+
+    VkFormat xrColorFormat = VK_FORMAT_UNDEFINED;
+    VkExtent2D xrExtent[kEyeCount]{};
+    VkRenderPass xrRenderPass = VK_NULL_HANDLE;
+    VkPipeline xrPipeline = VK_NULL_HANDLE;
+
+    // Per-eye render targets.
+    Texture xrMsaaColor[kEyeCount];
+    VkImage xrDepthImage[kEyeCount]{};
+    VkDeviceMemory xrDepthMemory[kEyeCount]{};
+    VkImageView xrDepthView[kEyeCount]{};
+    std::vector<VkImageView> xrImageViews[kEyeCount];
+    std::vector<VkFramebuffer> xrFramebuffers[kEyeCount];
+
+    // Per (frame-in-flight × eye) frame resources.
+    static constexpr uint32_t kXrSlots = MAX_FRAMES_IN_FLIGHT * kEyeCount;
+    std::vector<VkBuffer> xrUniformBuffers;
+    std::vector<VkDeviceMemory> xrUniformBuffersMemory;
+    std::vector<void *> xrUniformBuffersMapped;
+    std::vector<VkDescriptorSet> xrDescriptorSets;
+    std::vector<VkCommandBuffer> xrCommandBuffers;
+    VkFence xrInFlightFences[MAX_FRAMES_IN_FLIGHT]{};
+    VkDescriptorPool xrDescriptorPool = VK_NULL_HANDLE;
+    uint32_t xrCurrentFrame = 0;
 };
 
 #endif

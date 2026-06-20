@@ -21,6 +21,8 @@
 #include <meshoptimizer.h>
 
 #include "include/io.hpp"
+#include "include/player.hpp"
+#include "include/xr.hpp"
 #include "third_party/stb_image.h"
 
 namespace {
@@ -85,11 +87,26 @@ VkSampleCountFlagBits getMaxSampleCount(VkPhysicalDevice dev,
 
 } // namespace
 
-Renderer::Renderer(SDL_Window *window) : window(window) {
+Renderer::Renderer(SDL_Window *window, XrSystem *xrSystem) : window(window) {
+    xr = (xrSystem && xrSystem->available()) ? xrSystem : nullptr;
+
     createInstance();
     createSurface();
     pickPhysicalDevice();
     createLogicalDevice();
+
+    // With OpenXR, bind the session to the device and set up XR swapchains/input
+    // before building the rest so XR resources can be created up front.
+    if (xr) {
+        xr->createSession(instance, physicalDevice, device, graphicsFamily, 0);
+        xr->createReferenceSpace();
+        // Preferred XR color formats (SRGB). The render pass targets whatever
+        // the runtime picks from this list.
+        xrColorFormat = xr->createSwapchains(
+            {VK_FORMAT_R8G8B8A8_SRGB, VK_FORMAT_B8G8R8A8_SRGB});
+        xr->createInput();
+    }
+
     createSwapchain();
     msaaSamples = getMaxSampleCount(physicalDevice, swapchainFormat);
     createImageViews();
@@ -106,6 +123,13 @@ Renderer::Renderer(SDL_Window *window) : window(window) {
     createCommandBuffers();
     createSyncObjects();
     initImGui();
+
+    if (xr) {
+        createXrRenderPass();
+        xrPipeline = buildPipeline(xrRenderPass, msaaSamples);
+        createXrRenderTargets();
+        createXrFrameResources();
+    }
 }
 
 Renderer::~Renderer() {
@@ -118,6 +142,25 @@ Renderer::~Renderer() {
         ImGui_ImplSDL3_Shutdown();
         ImGui::DestroyContext();
         imguiInitialized = false;
+    }
+
+    if (xr) {
+        // Destroy our XR framebuffers/views (which reference runtime swapchain
+        // images) BEFORE telling OpenXR to destroy the swapchains/session, and
+        // both before the VkDevice goes away below.
+        destroyXrRenderTargets();
+        if (xrPipeline) vkDestroyPipeline(device, xrPipeline, nullptr);
+        if (xrRenderPass) vkDestroyRenderPass(device, xrRenderPass, nullptr);
+        for (size_t i = 0; i < xrUniformBuffers.size(); ++i) {
+            vkDestroyBuffer(device, xrUniformBuffers[i], nullptr);
+            vkFreeMemory(device, xrUniformBuffersMemory[i], nullptr);
+        }
+        if (xrDescriptorPool)
+            vkDestroyDescriptorPool(device, xrDescriptorPool, nullptr);
+        for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i)
+            if (xrInFlightFences[i])
+                vkDestroyFence(device, xrInFlightFences[i], nullptr);
+        xr->shutdownGraphics();
     }
 
     cleanupSwapchain();
@@ -195,8 +238,14 @@ void Renderer::createInstance() {
     createInfo.enabledLayerCount = static_cast<uint32_t>(layers.size());
     createInfo.ppEnabledLayerNames = layers.empty() ? nullptr : layers.data();
 
-    vkCheck(vkCreateInstance(&createInfo, nullptr, &instance),
-            "vkCreateInstance");
+    if (xr) {
+        // OpenXR creates the instance, injecting the extensions the runtime
+        // needs on top of ours (SDL surface ext + validation layers).
+        instance = xr->createVulkanInstance(createInfo);
+    } else {
+        vkCheck(vkCreateInstance(&createInfo, nullptr, &instance),
+                "vkCreateInstance");
+    }
 }
 
 void Renderer::createSurface() {
@@ -207,13 +256,19 @@ void Renderer::createSurface() {
 }
 
 void Renderer::pickPhysicalDevice() {
-    uint32_t count = 0;
-    vkEnumeratePhysicalDevices(instance, &count, nullptr);
-    if (count == 0) {
-        throw std::runtime_error("No Vulkan-capable GPU found");
+    std::vector<VkPhysicalDevice> devices;
+    if (xr) {
+        // OpenXR dictates which GPU drives the HMD; we must use exactly that one.
+        devices.push_back(xr->getVulkanPhysicalDevice(instance));
+    } else {
+        uint32_t count = 0;
+        vkEnumeratePhysicalDevices(instance, &count, nullptr);
+        if (count == 0) {
+            throw std::runtime_error("No Vulkan-capable GPU found");
+        }
+        devices.resize(count);
+        vkEnumeratePhysicalDevices(instance, &count, devices.data());
     }
-    std::vector<VkPhysicalDevice> devices(count);
-    vkEnumeratePhysicalDevices(instance, &count, devices.data());
 
     for (auto dev : devices) {
         // Find graphics + present queue families.
@@ -292,9 +347,15 @@ void Renderer::createLogicalDevice() {
     createInfo.enabledExtensionCount = 1;
     createInfo.ppEnabledExtensionNames = deviceExts;
 
-    vkCheck(vkCreateDevice(physicalDevice, &createInfo, nullptr, &device),
-            "vkCreateDevice");
+    if (xr) {
+        // OpenXR creates the device, injecting any extensions the runtime needs.
+        device = xr->createVulkanDevice(physicalDevice, createInfo);
+    } else {
+        vkCheck(vkCreateDevice(physicalDevice, &createInfo, nullptr, &device),
+                "vkCreateDevice");
+    }
 
+    // OpenXR's graphics binding uses queueIndex 0 of graphicsFamily — match it.
     vkGetDeviceQueue(device, graphicsFamily, 0, &graphicsQueue);
     vkGetDeviceQueue(device, presentFamily, 0, &presentQueue);
 }
@@ -589,6 +650,19 @@ VkShaderModule Renderer::createShaderModule(const char *spvPath) {
 }
 
 void Renderer::createGraphicsPipeline() {
+    // Pipeline layout is shared by the desktop and XR pipelines.
+    VkPipelineLayoutCreateInfo layoutInfo{};
+    layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    layoutInfo.setLayoutCount = 1;
+    layoutInfo.pSetLayouts = &descriptorSetLayout;
+    vkCheck(vkCreatePipelineLayout(device, &layoutInfo, nullptr, &pipelineLayout),
+            "vkCreatePipelineLayout");
+
+    graphicsPipeline = buildPipeline(renderPass, msaaSamples);
+}
+
+VkPipeline Renderer::buildPipeline(VkRenderPass rp,
+                                   VkSampleCountFlagBits samples) {
     VkShaderModule vert = createShaderModule(SHADER_DIR "/model.vert.spv");
     VkShaderModule frag = createShaderModule(SHADER_DIR "/model.frag.spv");
 
@@ -664,7 +738,7 @@ void Renderer::createGraphicsPipeline() {
     VkPipelineMultisampleStateCreateInfo multisample{};
     multisample.sType =
         VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
-    multisample.rasterizationSamples = msaaSamples;
+    multisample.rasterizationSamples = samples;
 
     VkPipelineDepthStencilStateCreateInfo depthStencil{};
     depthStencil.sType =
@@ -692,14 +766,6 @@ void Renderer::createGraphicsPipeline() {
     dynamicState.dynamicStateCount = static_cast<uint32_t>(dynStates.size());
     dynamicState.pDynamicStates = dynStates.data();
 
-    VkPipelineLayoutCreateInfo layoutInfo{};
-    layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-    layoutInfo.setLayoutCount = 1;
-    layoutInfo.pSetLayouts = &descriptorSetLayout;
-    vkCheck(vkCreatePipelineLayout(device, &layoutInfo, nullptr,
-                                   &pipelineLayout),
-            "vkCreatePipelineLayout");
-
     VkGraphicsPipelineCreateInfo pipelineInfo{};
     pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
     pipelineInfo.stageCount = 2;
@@ -713,15 +779,17 @@ void Renderer::createGraphicsPipeline() {
     pipelineInfo.pColorBlendState = &colorBlend;
     pipelineInfo.pDynamicState = &dynamicState;
     pipelineInfo.layout = pipelineLayout;
-    pipelineInfo.renderPass = renderPass;
+    pipelineInfo.renderPass = rp;
     pipelineInfo.subpass = 0;
 
+    VkPipeline pipeline = VK_NULL_HANDLE;
     vkCheck(vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo,
-                                      nullptr, &graphicsPipeline),
+                                      nullptr, &pipeline),
             "vkCreateGraphicsPipelines");
 
     vkDestroyShaderModule(device, frag, nullptr);
     vkDestroyShaderModule(device, vert, nullptr);
+    return pipeline;
 }
 
 void Renderer::createFramebuffers() {
@@ -1300,6 +1368,45 @@ void Renderer::createDescriptorSets() {
         vkUpdateDescriptorSets(device, static_cast<uint32_t>(writes.size()),
                                writes.data(), 0, nullptr);
     }
+
+    // XR per-eye descriptor sets (allocated up front in createXrFrameResources);
+    // each points at its own UBO slot and the shared PBR textures.
+    if (xr) {
+        for (uint32_t s = 0; s < kXrSlots; ++s) {
+            VkDescriptorBufferInfo bufferInfo{};
+            bufferInfo.buffer = xrUniformBuffers[s];
+            bufferInfo.offset = 0;
+            bufferInfo.range = sizeof(UniformBufferObject);
+
+            std::array<VkDescriptorImageInfo, 4> imageInfos{};
+            for (int t = 0; t < 4; ++t) {
+                imageInfos[t].imageLayout =
+                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                imageInfos[t].imageView = pbrTextures[t].view;
+                imageInfos[t].sampler = textureSampler;
+            }
+
+            std::array<VkWriteDescriptorSet, 5> writes{};
+            writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writes[0].dstSet = xrDescriptorSets[s];
+            writes[0].dstBinding = 0;
+            writes[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+            writes[0].descriptorCount = 1;
+            writes[0].pBufferInfo = &bufferInfo;
+
+            for (int t = 0; t < 4; ++t) {
+                writes[t + 1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                writes[t + 1].dstSet = xrDescriptorSets[s];
+                writes[t + 1].dstBinding = t + 1;
+                writes[t + 1].descriptorType =
+                    VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                writes[t + 1].descriptorCount = 1;
+                writes[t + 1].pImageInfo = &imageInfos[t];
+            }
+            vkUpdateDescriptorSets(device, static_cast<uint32_t>(writes.size()),
+                                   writes.data(), 0, nullptr);
+        }
+    }
 }
 
 void Renderer::createCommandBuffers() {
@@ -1402,7 +1509,7 @@ void Renderer::updateUniformBuffer(uint32_t frame, const glm::mat4 &view,
                                    const glm::vec3 &lightDir,
                                    const glm::vec3 &camPos) {
     UniformBufferObject ubo{};
-    ubo.model = glm::mat4(1.0f);
+    ubo.model = objectTransform;
     ubo.view = view;
     ubo.proj = proj;
     ubo.lightDir = glm::vec4(lightDir, 0.0f);
@@ -1501,6 +1608,18 @@ void Renderer::setMsaaSamples(VkSampleCountFlagBits samples) {
     createGraphicsPipeline();
     createFramebuffers();
     initImGui();
+
+    // The XR pipeline/render pass also depend on the sample count; rebuild them.
+    if (xr) {
+        destroyXrRenderTargets();
+        if (xrPipeline) vkDestroyPipeline(device, xrPipeline, nullptr);
+        if (xrRenderPass) vkDestroyRenderPass(device, xrRenderPass, nullptr);
+        xrPipeline = VK_NULL_HANDLE;
+        xrRenderPass = VK_NULL_HANDLE;
+        createXrRenderPass();
+        xrPipeline = buildPipeline(xrRenderPass, msaaSamples);
+        createXrRenderTargets();
+    }
 }
 
 void Renderer::initImGui() {
@@ -1587,4 +1706,311 @@ void Renderer::drawFrame(const glm::mat4 &view, const glm::mat4 &proj,
     }
 
     currentFrame = (currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
+}
+
+// ---------------------------------------------------------------------------
+// OpenXR per-eye rendering
+// ---------------------------------------------------------------------------
+
+void Renderer::createXrRenderPass() {
+    // Same 3-attachment MSAA layout as the desktop pass, but targeting the XR
+    // swapchain color format and leaving the resolved image in
+    // COLOR_ATTACHMENT_OPTIMAL (the layout the runtime expects on release).
+    VkAttachmentDescription colorAttachment{};
+    colorAttachment.format = xrColorFormat;
+    colorAttachment.samples = msaaSamples;
+    colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    colorAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    colorAttachment.finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+    VkAttachmentDescription depthAttachment{};
+    depthAttachment.format = depthFormat;
+    depthAttachment.samples = msaaSamples;
+    depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    depthAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    depthAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    depthAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    depthAttachment.finalLayout =
+        VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+    VkAttachmentDescription resolveAttachment{};
+    resolveAttachment.format = xrColorFormat;
+    resolveAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+    resolveAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    resolveAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    resolveAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    resolveAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    resolveAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    resolveAttachment.finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+    VkAttachmentReference colorRef{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+    VkAttachmentReference depthRef{
+        1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+    VkAttachmentReference resolveRef{2,
+                                     VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+
+    VkSubpassDescription subpass{};
+    subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    subpass.colorAttachmentCount = 1;
+    subpass.pColorAttachments = &colorRef;
+    subpass.pDepthStencilAttachment = &depthRef;
+    subpass.pResolveAttachments = &resolveRef;
+
+    VkSubpassDependency dependency{};
+    dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
+    dependency.dstSubpass = 0;
+    dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                              VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+    dependency.srcAccessMask = 0;
+    dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                              VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+    dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+                               VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+
+    std::array<VkAttachmentDescription, 3> attachments = {
+        colorAttachment, depthAttachment, resolveAttachment};
+    VkRenderPassCreateInfo info{};
+    info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+    info.attachmentCount = static_cast<uint32_t>(attachments.size());
+    info.pAttachments = attachments.data();
+    info.subpassCount = 1;
+    info.pSubpasses = &subpass;
+    info.dependencyCount = 1;
+    info.pDependencies = &dependency;
+
+    vkCheck(vkCreateRenderPass(device, &info, nullptr, &xrRenderPass),
+            "vkCreateRenderPass (XR)");
+}
+
+void Renderer::createXrRenderTargets() {
+    for (uint32_t e = 0; e < kEyeCount; ++e) {
+        const XrSystem::EyeSwapchain &sc = xr->eye(e);
+        xrExtent[e] = {sc.width, sc.height};
+
+        // Per-eye MSAA color + depth (separate per eye so the two eyes never
+        // alias their shared targets).
+        createImage(sc.width, sc.height, 1, xrColorFormat,
+                    VK_IMAGE_TILING_OPTIMAL,
+                    VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT |
+                        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+                    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, xrMsaaColor[e].image,
+                    xrMsaaColor[e].memory, msaaSamples);
+        xrMsaaColor[e].view = createImageView(
+            xrMsaaColor[e].image, xrColorFormat, VK_IMAGE_ASPECT_COLOR_BIT, 1);
+
+        createImage(sc.width, sc.height, 1, depthFormat, VK_IMAGE_TILING_OPTIMAL,
+                    VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+                    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, xrDepthImage[e],
+                    xrDepthMemory[e], msaaSamples);
+        xrDepthView[e] = createImageView(xrDepthImage[e], depthFormat,
+                                         VK_IMAGE_ASPECT_DEPTH_BIT, 1);
+
+        // One image view + framebuffer per runtime swapchain image.
+        xrImageViews[e].resize(sc.images.size());
+        xrFramebuffers[e].resize(sc.images.size());
+        for (size_t i = 0; i < sc.images.size(); ++i) {
+            xrImageViews[e][i] = createImageView(
+                sc.images[i], xrColorFormat, VK_IMAGE_ASPECT_COLOR_BIT, 1);
+
+            std::array<VkImageView, 3> attachments = {
+                xrMsaaColor[e].view, xrDepthView[e], xrImageViews[e][i]};
+            VkFramebufferCreateInfo info{};
+            info.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+            info.renderPass = xrRenderPass;
+            info.attachmentCount = static_cast<uint32_t>(attachments.size());
+            info.pAttachments = attachments.data();
+            info.width = sc.width;
+            info.height = sc.height;
+            info.layers = 1;
+            vkCheck(vkCreateFramebuffer(device, &info, nullptr,
+                                        &xrFramebuffers[e][i]),
+                    "vkCreateFramebuffer (XR)");
+        }
+    }
+}
+
+void Renderer::destroyXrRenderTargets() {
+    for (uint32_t e = 0; e < kEyeCount; ++e) {
+        for (auto fb : xrFramebuffers[e])
+            vkDestroyFramebuffer(device, fb, nullptr);
+        xrFramebuffers[e].clear();
+        for (auto v : xrImageViews[e]) vkDestroyImageView(device, v, nullptr);
+        xrImageViews[e].clear();
+
+        destroyTexture(xrMsaaColor[e]);
+        if (xrDepthView[e]) vkDestroyImageView(device, xrDepthView[e], nullptr);
+        if (xrDepthImage[e]) vkDestroyImage(device, xrDepthImage[e], nullptr);
+        if (xrDepthMemory[e]) vkFreeMemory(device, xrDepthMemory[e], nullptr);
+        xrDepthView[e] = VK_NULL_HANDLE;
+        xrDepthImage[e] = VK_NULL_HANDLE;
+        xrDepthMemory[e] = VK_NULL_HANDLE;
+    }
+}
+
+void Renderer::createXrFrameResources() {
+    // Per-slot uniform buffers (frame-in-flight x eye), persistently mapped.
+    VkDeviceSize size = sizeof(UniformBufferObject);
+    xrUniformBuffers.resize(kXrSlots);
+    xrUniformBuffersMemory.resize(kXrSlots);
+    xrUniformBuffersMapped.resize(kXrSlots);
+    for (uint32_t i = 0; i < kXrSlots; ++i) {
+        createBuffer(size, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                         VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                     xrUniformBuffers[i], xrUniformBuffersMemory[i]);
+        vkMapMemory(device, xrUniformBuffersMemory[i], 0, size, 0,
+                    &xrUniformBuffersMapped[i]);
+    }
+
+    // Dedicated descriptor pool for the XR sets.
+    std::array<VkDescriptorPoolSize, 2> poolSizes{};
+    poolSizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    poolSizes[0].descriptorCount = kXrSlots;
+    poolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    poolSizes[1].descriptorCount = kXrSlots * 4;
+    VkDescriptorPoolCreateInfo poolInfo{};
+    poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    poolInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
+    poolInfo.pPoolSizes = poolSizes.data();
+    poolInfo.maxSets = kXrSlots;
+    vkCheck(vkCreateDescriptorPool(device, &poolInfo, nullptr, &xrDescriptorPool),
+            "vkCreateDescriptorPool (XR)");
+
+    std::vector<VkDescriptorSetLayout> layouts(kXrSlots, descriptorSetLayout);
+    VkDescriptorSetAllocateInfo alloc{};
+    alloc.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    alloc.descriptorPool = xrDescriptorPool;
+    alloc.descriptorSetCount = kXrSlots;
+    alloc.pSetLayouts = layouts.data();
+    xrDescriptorSets.resize(kXrSlots);
+    vkCheck(vkAllocateDescriptorSets(device, &alloc, xrDescriptorSets.data()),
+            "vkAllocateDescriptorSets (XR)");
+    // Texture bindings are written later in createDescriptorSets() (uploadObject).
+
+    // Command buffers: one per slot.
+    xrCommandBuffers.resize(kXrSlots);
+    VkCommandBufferAllocateInfo cbInfo{};
+    cbInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    cbInfo.commandPool = commandPool;
+    cbInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    cbInfo.commandBufferCount = kXrSlots;
+    vkCheck(vkAllocateCommandBuffers(device, &cbInfo, xrCommandBuffers.data()),
+            "vkAllocateCommandBuffers (XR)");
+
+    // One fence per frame-in-flight (both eyes share it via a combined submit).
+    VkFenceCreateInfo fenceInfo{};
+    fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+        vkCheck(vkCreateFence(device, &fenceInfo, nullptr, &xrInFlightFences[i]),
+                "vkCreateFence (XR)");
+    }
+}
+
+void Renderer::recordXrCommandBuffer(VkCommandBuffer cmd, uint32_t eye,
+                                     uint32_t imageIndex, VkDescriptorSet set) {
+    VkCommandBufferBeginInfo begin{};
+    begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    vkCheck(vkBeginCommandBuffer(cmd, &begin), "vkBeginCommandBuffer (XR)");
+
+    std::array<VkClearValue, 3> clears{};
+    clears[0].color = {{0.05f, 0.05f, 0.08f, 1.0f}};
+    clears[1].depthStencil = {1.0f, 0};
+
+    VkRenderPassBeginInfo rpBegin{};
+    rpBegin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+    rpBegin.renderPass = xrRenderPass;
+    rpBegin.framebuffer = xrFramebuffers[eye][imageIndex];
+    rpBegin.renderArea.extent = xrExtent[eye];
+    rpBegin.clearValueCount = static_cast<uint32_t>(clears.size());
+    rpBegin.pClearValues = clears.data();
+
+    vkCmdBeginRenderPass(cmd, &rpBegin, VK_SUBPASS_CONTENTS_INLINE);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, xrPipeline);
+
+    VkViewport viewport{};
+    viewport.width = static_cast<float>(xrExtent[eye].width);
+    viewport.height = static_cast<float>(xrExtent[eye].height);
+    viewport.maxDepth = 1.0f;
+    vkCmdSetViewport(cmd, 0, 1, &viewport);
+    VkRect2D scissor{};
+    scissor.extent = xrExtent[eye];
+    vkCmdSetScissor(cmd, 0, 1, &scissor);
+
+    VkBuffer vbs[] = {vertexBuffer};
+    VkDeviceSize offsets[] = {0};
+    vkCmdBindVertexBuffers(cmd, 0, 1, vbs, offsets);
+    vkCmdBindIndexBuffer(cmd, indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout,
+                            0, 1, &set, 0, nullptr);
+    vkCmdDrawIndexed(cmd, indexCount, 1, 0, 0, 0);
+
+    vkCmdEndRenderPass(cmd);
+    vkCheck(vkEndCommandBuffer(cmd), "vkEndCommandBuffer (XR)");
+}
+
+void Renderer::renderXrFrame(XrSystem &xrSys, const PlayerRig &player,
+                             const glm::vec3 &lightDir) {
+    XrSystem::FrameState fs = xrSys.beginFrame();
+    if (!fs.shouldRender) {
+        xrSys.endFrame(fs, false);
+        return;
+    }
+
+    const uint32_t frame = xrCurrentFrame;
+    vkWaitForFences(device, 1, &xrInFlightFences[frame], VK_TRUE, UINT64_MAX);
+    vkResetFences(device, 1, &xrInFlightFences[frame]);
+
+    const glm::mat4 worldFromStage = player.worldFromStage();
+
+    // Acquire + record both eyes, then submit together so a single fence covers
+    // the whole frame.
+    std::array<VkCommandBuffer, kEyeCount> cmds{};
+    for (uint32_t eye = 0; eye < kEyeCount; ++eye) {
+        const uint32_t img = xrSys.acquireImage(eye);
+        const uint32_t slot = frame * kEyeCount + eye;
+
+        const glm::mat4 worldFromView =
+            worldFromStage * xrPoseToMatrix(fs.views[eye].pose);
+        const glm::mat4 view = glm::inverse(worldFromView);
+        const glm::mat4 proj =
+            xrProjFromFov(fs.views[eye].fov, 0.01f, 1000.0f);
+        const glm::vec3 eyePos = glm::vec3(worldFromView[3]);
+
+        UniformBufferObject ubo{};
+        ubo.model = objectTransform;
+        ubo.view = view;
+        ubo.proj = proj;
+        ubo.lightDir = glm::vec4(lightDir, 0.0f);
+        ubo.camPos = glm::vec4(eyePos, 1.0f);
+        ubo.quantMin = glm::vec4(quantMin, 0.0f);
+        ubo.quantExtent = glm::vec4(quantExtent, 0.0f);
+        std::memcpy(xrUniformBuffersMapped[slot], &ubo, sizeof(ubo));
+
+        cmds[eye] = xrCommandBuffers[slot];
+        vkResetCommandBuffer(cmds[eye], 0);
+        recordXrCommandBuffer(cmds[eye], eye, img, xrDescriptorSets[slot]);
+
+        if (eye == 0) {
+            lastEyeView = view;
+            lastEyeProj = proj;
+            lastEyePos = eyePos;
+        }
+    }
+
+    VkSubmitInfo submit{};
+    submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submit.commandBufferCount = kEyeCount;
+    submit.pCommandBuffers = cmds.data();
+    vkCheck(vkQueueSubmit(graphicsQueue, 1, &submit, xrInFlightFences[frame]),
+            "vkQueueSubmit (XR)");
+
+    for (uint32_t eye = 0; eye < kEyeCount; ++eye) xrSys.releaseImage(eye);
+
+    xrSys.endFrame(fs, true);
+    xrCurrentFrame = (frame + 1) % MAX_FRAMES_IN_FLIGHT;
 }

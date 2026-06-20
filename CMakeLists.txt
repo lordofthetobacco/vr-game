@@ -32,6 +32,13 @@ else()
     message(FATAL_ERROR "Assimp not found")
 endif()
 
+find_package(OpenXR REQUIRED)
+if(OpenXR_FOUND)
+    message(STATUS "Found OpenXR: ${OpenXR_VERSION}")
+else()
+    message(FATAL_ERROR "OpenXR not found")
+endif()
+
 # --- Dear ImGui (fetched from GitHub) ---
 include(FetchContent)
 FetchContent_Declare(
@@ -41,6 +48,7 @@ FetchContent_Declare(
     GIT_SHALLOW    TRUE
 )
 FetchContent_MakeAvailable(imgui)
+FetchContent_GetProperties(imgui SOURCE_DIR imgui_SOURCE_DIR)
 
 add_library(imgui_lib STATIC
     ${imgui_SOURCE_DIR}/imgui.cpp
@@ -72,6 +80,7 @@ add_executable(ForceUnleashedVR
     src/model.cpp
     src/object.cpp
     src/renderer.cpp
+    src/xr.cpp
     src/stb_image_impl.cpp
 )
 target_compile_options(ForceUnleashedVR PRIVATE
@@ -79,10 +88,16 @@ target_compile_options(ForceUnleashedVR PRIVATE
     "$<$<CXX_COMPILER_ID:Clang>:-Wall;-Wextra;-Wpedantic>"
 )
 target_include_directories(ForceUnleashedVR PRIVATE ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(ForceUnleashedVR PRIVATE SDL3::SDL3 Vulkan::Vulkan assimp::assimp imgui_lib meshoptimizer)
+target_link_libraries(ForceUnleashedVR PRIVATE SDL3::SDL3 Vulkan::Vulkan assimp::assimp imgui_lib meshoptimizer OpenXR::openxr_loader OpenXR::headers)
 
 # stb_image is third-party single-header code: suppress its warnings.
 set_source_files_properties(src/stb_image_impl.cpp PROPERTIES COMPILE_OPTIONS "-w")
+
+# OpenXR structs are initialized with the idiomatic `{XR_TYPE_*}` form (only the
+# .type member listed); the rest are intentionally left zero. Silence the
+# resulting missing-field-initializer noise for this file only.
+set_source_files_properties(src/xr.cpp PROPERTIES
+    COMPILE_OPTIONS "-Wno-missing-field-initializers")
 
 # --- Shader compilation (GLSL -> SPIR-V) ---
 # Fetch and build the reference glslang compiler so no local Vulkan SDK install

@@ -1,8 +1,8 @@
 # Top-level: path to the 3D model (.obj, .fbx, .glb, or .gltf)
-model = "/Users/fcieslar/Downloads/luke-skywalkers-lightsaber/source/luke.fbx"
+model = "/home/fcieslar/Downloads/luke-skywalkers-lightsaber/source/luke.fbx"
 
 [textures]
-base = "/Users/fcieslar/Downloads/luke-skywalkers-lightsaber/textures/LSWBase2.png"     # albedo / diffuse
-normal = "/Users/fcieslar/Downloads/luke-skywalkers-lightsaber/textures/LSWNormals.png"       # normal map
-roughness = "/Users/fcieslar/Downloads/luke-skywalkers-lightsaber/textures/LSWRoughness.png" # roughness map
-metallic = "/Users/fcieslar/Downloads/luke-skywalkers-lightsaber/textures/LSAWMetallic.png"   # metallic map
+base = "/home/fcieslar/Downloads/luke-skywalkers-lightsaber/textures/LSWBase2.png"     # albedo / diffuse
+normal = "/home/fcieslar/Downloads/luke-skywalkers-lightsaber/textures/LSWNormals.png"       # normal map
+roughness = "/home/fcieslar/Downloads/luke-skywalkers-lightsaber/textures/LSWRoughness.png" # roughness map
+metallic = "/home/fcieslar/Downloads/luke-skywalkers-lightsaber/textures/LSAWMetallic.png"   # metallic map
