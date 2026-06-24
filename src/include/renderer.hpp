@@ -17,17 +17,27 @@ class PlayerRig;
 
 // The four metallic-roughness PBR maps for an object. Paths are loaded from
 // disk; if a path is empty the renderer substitutes a default constant texture.
-struct TextureSet {
+struct TextureSet
+{
     std::string base;
     std::string normal;
     std::string roughness;
     std::string metallic;
 };
 
-// Minimal Vulkan renderer for a single indexed mesh shaded with metallic-
-// roughness PBR under one directional light. Owns all Vulkan objects and tears
-// them down in the destructor.
-class Renderer {
+// Associates a mesh slot with a per-draw world transform.
+struct DrawCall
+{
+    uint32_t meshId = 0;
+    glm::mat4 transform{1.0f};
+};
+
+// Minimal Vulkan renderer for an indexed mesh shaded with metallic-roughness
+// PBR under one directional light. The mesh can be drawn multiple times with
+// per-object transforms. Owns all Vulkan objects and tears them down in the
+// destructor.
+class Renderer
+{
 public:
     // `xr` may be null (or an unavailable system) for desktop-only operation;
     // when present, the Vulkan instance/device are created through OpenXR and an
@@ -64,8 +74,26 @@ public:
     glm::mat4 lastEyeProj{1.0f};
     glm::vec3 lastEyePos{0.0f};
 
-    // World transform applied to the model (UBO.model). Defaults to identity.
-    void setObjectTransform(const glm::mat4 &m) { objectTransform = m; }
+    // Upload an additional mesh and return its meshId (1, 2, …).
+    // uploadObject must be called first to initialise slot 0.
+    uint32_t uploadMesh(const Model &model, const TextureSet &textures);
+
+    // Set the list of draw calls used by the next frame.
+    void setDrawCalls(const std::vector<DrawCall> &calls)
+    {
+        drawCalls = calls.empty() ? std::vector<DrawCall>{{0, glm::mat4(1.0f)}} : calls;
+    }
+
+    // Backward-compatible helpers — all draws use mesh slot 0.
+    void setObjectTransform(const glm::mat4 &m) { drawCalls = {{0, m}}; }
+    void setObjectTransforms(const std::vector<glm::mat4> &transforms)
+    {
+        drawCalls.clear();
+        for (const auto &t : transforms)
+            drawCalls.push_back({0, t});
+        if (drawCalls.empty())
+            drawCalls = {{0, glm::mat4(1.0f)}};
+    }
 
     bool hasXr() const { return xr != nullptr; }
 
@@ -79,8 +107,8 @@ public:
 private:
     static constexpr int MAX_FRAMES_IN_FLIGHT = 2;
 
-    struct UniformBufferObject {
-        glm::mat4 model;
+    struct UniformBufferObject
+    {
         glm::mat4 view;
         glm::mat4 proj;
         glm::vec4 lightDir;
@@ -89,7 +117,8 @@ private:
         glm::vec4 quantExtent; // xyz: bbox extent (max - min)
     };
 
-    struct Texture {
+    struct Texture
+    {
         VkImage image = VK_NULL_HANDLE;
         VkDeviceMemory memory = VK_NULL_HANDLE;
         VkImageView view = VK_NULL_HANDLE;
@@ -130,11 +159,12 @@ private:
 
     // --- XR setup / teardown (only when xr != nullptr) ---
     void createXrRenderPass();
-    void createXrRenderTargets();  // per-eye MSAA + depth + image views + FBs
+    void createXrRenderTargets(); // per-eye MSAA + depth + image views + FBs
     void destroyXrRenderTargets();
-    void createXrFrameResources();  // UBOs, descriptor sets, cmd buffers, fences
+    void createXrFrameResources(); // UBOs, descriptor sets, cmd buffers, fences
     void recordXrCommandBuffer(VkCommandBuffer cmd, uint32_t eye,
-                               uint32_t imageIndex, VkDescriptorSet set);
+                               uint32_t imageIndex, VkDescriptorSet set,
+                               uint32_t xrSlotIdx);
 
     // Quantize `model` into PackedVertex form and (re)create the vertex/index
     // buffers, destroying any existing ones first. Sets indexCount.
@@ -171,11 +201,33 @@ private:
     void destroyTexture(Texture &tex);
     void createDescriptorSets();
 
+    // Extra mesh slot (meshId >= 1): geometry + textures + own descriptor sets.
+    // Slot 0 uses the existing vertex/index/texture/descriptor members below.
+    struct ExtraSlot
+    {
+        VkBuffer vb = VK_NULL_HANDLE, ib = VK_NULL_HANDLE;
+        VkDeviceMemory vbMem = VK_NULL_HANDLE, ibMem = VK_NULL_HANDLE;
+        uint32_t indexCount = 0;
+        glm::vec3 quantMin{0.0f}, quantExtent{1.0f};
+        Texture pbr[4];
+        VkDescriptorPool descPool = VK_NULL_HANDLE;
+        std::vector<VkDescriptorSet> descSets;   // MAX_FRAMES_IN_FLIGHT
+        std::vector<VkDescriptorSet> xrDescSets; // kXrSlots
+        std::vector<VkBuffer> ubos;              // MAX_FRAMES_IN_FLIGHT
+        std::vector<VkDeviceMemory> ubosMem;
+        std::vector<void *> ubosMapped;
+        std::vector<VkBuffer> xrUbos; // kXrSlots
+        std::vector<VkDeviceMemory> xrUbosMem;
+        std::vector<void *> xrUbosMapped;
+    };
+
     SDL_Window *window = nullptr;
     XrSystem *xr = nullptr;
 
-    // World transform for the single object (UBO.model).
-    glm::mat4 objectTransform{1.0f};
+    // Active draw calls for the next frame.
+    std::vector<DrawCall> drawCalls{{0, glm::mat4(1.0f)}};
+    // Additional mesh slots (meshId 1+).
+    std::vector<ExtraSlot> extraSlots;
 
     VkInstance instance = VK_NULL_HANDLE;
     VkSurfaceKHR surface = VK_NULL_HANDLE;

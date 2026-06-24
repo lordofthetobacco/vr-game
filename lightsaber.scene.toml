@@ -1,0 +1,50 @@
+# ForceUnleashedVR scene file
+# Run: ./ForceUnleashedVR ../lightsaber.scene.toml
+#
+# Object format:
+#   [objects.<name>]          - entity definition
+#   [objects.<name>.textures] - PBR texture paths
+#   [objects.<name>.collider] - collision shape (box | mesh_aabb | mesh_convex)
+#   [objects.<name>.rigidbody]- physics simulation properties
+
+[config]
+gravity_y = -9.81
+
+[hands]
+enabled    = true
+radius     = 0.06
+# model    = "/path/to/hand.glb"   # optional
+offset_x   = 0.0
+offset_y   = 0.0
+offset_z   = 0.0
+rotation_x = -90.0
+rotation_y = 0.0
+rotation_z = 0.0
+
+[objects.lightsaber]
+model        = "/home/fcieslar/Downloads/luke-skywalkers-lightsaber/source/luke.fbx"
+position     = [0.0, 1.2, -1.5]
+rotation_deg = [0.0, 0.0, 0.0]
+scale        = 1.0
+grabbable    = true
+
+[objects.lightsaber.textures]
+base      = "/home/fcieslar/Downloads/luke-skywalkers-lightsaber/textures/LSWBase2.png"
+normal    = "/home/fcieslar/Downloads/luke-skywalkers-lightsaber/textures/LSWNormals.png"
+roughness = "/home/fcieslar/Downloads/luke-skywalkers-lightsaber/textures/LSWRoughness.png"
+metallic  = "/home/fcieslar/Downloads/luke-skywalkers-lightsaber/textures/LSAWMetallic.png"
+
+[objects.lightsaber.collider]
+enabled = true
+type    = "mesh_aabb"   # box | mesh_aabb | mesh_convex
+# half_extents = [0.05, 0.5, 0.05]  # only used when type = "box"
+
+[objects.lightsaber.rigidbody]
+enabled         = true
+body_type       = "dynamic"   # static | dynamic | kinematic
+mass            = 0.3
+restitution     = 0.2
+friction        = 0.5
+linear_damping  = 0.05
+angular_damping = 0.05
+gravity_scale   = 1.0

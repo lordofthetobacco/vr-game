@@ -25,69 +25,85 @@
 #include "include/xr.hpp"
 #include "third_party/stb_image.h"
 
-namespace {
+namespace
+{
 
-const char *kValidationLayer = "VK_LAYER_KHRONOS_validation";
+    const char *kValidationLayer = "VK_LAYER_KHRONOS_validation";
 
-void vkCheck(VkResult result, const char *what) {
-    if (result != VK_SUCCESS) {
-        std::string msg = std::string("Vulkan error (") + std::to_string(result) +
-                          ") in " + what;
-        throw std::runtime_error(msg);
-    }
-}
-
-bool validationLayerAvailable() {
-    uint32_t count = 0;
-    vkEnumerateInstanceLayerProperties(&count, nullptr);
-    std::vector<VkLayerProperties> layers(count);
-    vkEnumerateInstanceLayerProperties(&count, layers.data());
-    for (const auto &l : layers) {
-        if (std::strcmp(l.layerName, kValidationLayer) == 0) {
-            return true;
+    void vkCheck(VkResult result, const char *what)
+    {
+        if (result != VK_SUCCESS)
+        {
+            std::string msg = std::string("Vulkan error (") + std::to_string(result) +
+                              ") in " + what;
+            throw std::runtime_error(msg);
         }
     }
-    return false;
-}
 
-// GPU vertex layout after 16-bit/8-bit quantization. 20 bytes vs 48 for the
-// in-memory float Vertex. Decoded for free by Vulkan vertex fetch; position is
-// dequantized in the vertex shader using the UBO bbox.
-struct PackedVertex {
-    uint16_t pos[4];     // R16G16B16A16_UNORM (bbox-normalized; w unused)
-    int8_t normal[4];    // R8G8B8A8_SNORM (w unused)
-    int8_t tangent[4];   // R8G8B8A8_SNORM (xyz tangent, w = handedness sign)
-    uint16_t uv[2];      // R16G16_SFLOAT
-};
-
-VkSampleCountFlagBits getMaxSampleCount(VkPhysicalDevice dev,
-                                        VkFormat colorFormat) {
-    VkPhysicalDeviceProperties props;
-    vkGetPhysicalDeviceProperties(dev, &props);
-
-    VkSampleCountFlags counts = props.limits.framebufferColorSampleCounts &
-                                props.limits.framebufferDepthSampleCounts;
-
-    // Intersect with what the specific color format actually supports as a
-    // multisampled attachment — device limits alone don't account for this.
-    VkImageFormatProperties fmtProps{};
-    if (vkGetPhysicalDeviceImageFormatProperties(
-            dev, colorFormat, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL,
-            VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT |
-                VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
-            0, &fmtProps) == VK_SUCCESS) {
-        counts &= fmtProps.sampleCounts;
+    bool validationLayerAvailable()
+    {
+        uint32_t count = 0;
+        vkEnumerateInstanceLayerProperties(&count, nullptr);
+        std::vector<VkLayerProperties> layers(count);
+        vkEnumerateInstanceLayerProperties(&count, layers.data());
+        for (const auto &l : layers)
+        {
+            if (std::strcmp(l.layerName, kValidationLayer) == 0)
+            {
+                return true;
+            }
+        }
+        return false;
     }
 
-    for (auto c : {VK_SAMPLE_COUNT_8_BIT, VK_SAMPLE_COUNT_4_BIT,
-                   VK_SAMPLE_COUNT_2_BIT})
-        if (counts & c) return c;
-    return VK_SAMPLE_COUNT_1_BIT;
-}
+    // GPU vertex layout after 16-bit/8-bit quantization. 20 bytes vs 48 for the
+    // in-memory float Vertex. Decoded for free by Vulkan vertex fetch; position is
+    // dequantized in the vertex shader using the UBO bbox.
+    struct PackedVertex
+    {
+        uint16_t pos[4];   // R16G16B16A16_UNORM (bbox-normalized; w unused)
+        int8_t normal[4];  // R8G8B8A8_SNORM (w unused)
+        int8_t tangent[4]; // R8G8B8A8_SNORM (xyz tangent, w = handedness sign)
+        uint16_t uv[2];    // R16G16_SFLOAT
+    };
+
+    struct PushConstants
+    {
+        glm::mat4 model;
+    };
+
+    VkSampleCountFlagBits getMaxSampleCount(VkPhysicalDevice dev,
+                                            VkFormat colorFormat)
+    {
+        VkPhysicalDeviceProperties props;
+        vkGetPhysicalDeviceProperties(dev, &props);
+
+        VkSampleCountFlags counts = props.limits.framebufferColorSampleCounts &
+                                    props.limits.framebufferDepthSampleCounts;
+
+        // Intersect with what the specific color format actually supports as a
+        // multisampled attachment — device limits alone don't account for this.
+        VkImageFormatProperties fmtProps{};
+        if (vkGetPhysicalDeviceImageFormatProperties(
+                dev, colorFormat, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL,
+                VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT |
+                    VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+                0, &fmtProps) == VK_SUCCESS)
+        {
+            counts &= fmtProps.sampleCounts;
+        }
+
+        for (auto c : {VK_SAMPLE_COUNT_8_BIT, VK_SAMPLE_COUNT_4_BIT,
+                       VK_SAMPLE_COUNT_2_BIT})
+            if (counts & c)
+                return c;
+        return VK_SAMPLE_COUNT_1_BIT;
+    }
 
 } // namespace
 
-Renderer::Renderer(SDL_Window *window, XrSystem *xrSystem) : window(window) {
+Renderer::Renderer(SDL_Window *window, XrSystem *xrSystem) : window(window)
+{
     xr = (xrSystem && xrSystem->available()) ? xrSystem : nullptr;
 
     createInstance();
@@ -97,7 +113,8 @@ Renderer::Renderer(SDL_Window *window, XrSystem *xrSystem) : window(window) {
 
     // With OpenXR, bind the session to the device and set up XR swapchains/input
     // before building the rest so XR resources can be created up front.
-    if (xr) {
+    if (xr)
+    {
         xr->createSession(instance, physicalDevice, device, graphicsFamily, 0);
         xr->createReferenceSpace();
         // Preferred XR color formats (SRGB). The render pass targets whatever
@@ -124,7 +141,8 @@ Renderer::Renderer(SDL_Window *window, XrSystem *xrSystem) : window(window) {
     createSyncObjects();
     initImGui();
 
-    if (xr) {
+    if (xr)
+    {
         createXrRenderPass();
         xrPipeline = buildPipeline(xrRenderPass, msaaSamples);
         createXrRenderTargets();
@@ -132,26 +150,33 @@ Renderer::Renderer(SDL_Window *window, XrSystem *xrSystem) : window(window) {
     }
 }
 
-Renderer::~Renderer() {
-    if (device != VK_NULL_HANDLE) {
+Renderer::~Renderer()
+{
+    if (device != VK_NULL_HANDLE)
+    {
         vkDeviceWaitIdle(device);
     }
 
-    if (imguiInitialized) {
+    if (imguiInitialized)
+    {
         ImGui_ImplVulkan_Shutdown();
         ImGui_ImplSDL3_Shutdown();
         ImGui::DestroyContext();
         imguiInitialized = false;
     }
 
-    if (xr) {
+    if (xr)
+    {
         // Destroy our XR framebuffers/views (which reference runtime swapchain
         // images) BEFORE telling OpenXR to destroy the swapchains/session, and
         // both before the VkDevice goes away below.
         destroyXrRenderTargets();
-        if (xrPipeline) vkDestroyPipeline(device, xrPipeline, nullptr);
-        if (xrRenderPass) vkDestroyRenderPass(device, xrRenderPass, nullptr);
-        for (size_t i = 0; i < xrUniformBuffers.size(); ++i) {
+        if (xrPipeline)
+            vkDestroyPipeline(device, xrPipeline, nullptr);
+        if (xrRenderPass)
+            vkDestroyRenderPass(device, xrRenderPass, nullptr);
+        for (size_t i = 0; i < xrUniformBuffers.size(); ++i)
+        {
             vkDestroyBuffer(device, xrUniformBuffers[i], nullptr);
             vkFreeMemory(device, xrUniformBuffersMemory[i], nullptr);
         }
@@ -163,43 +188,88 @@ Renderer::~Renderer() {
         xr->shutdownGraphics();
     }
 
+    // Extra mesh slots.
+    for (auto &es : extraSlots)
+    {
+        if (es.descPool)
+            vkDestroyDescriptorPool(device, es.descPool, nullptr);
+        for (size_t i = 0; i < es.ubos.size(); ++i)
+        {
+            vkDestroyBuffer(device, es.ubos[i], nullptr);
+            vkFreeMemory(device, es.ubosMem[i], nullptr);
+        }
+        for (size_t i = 0; i < es.xrUbos.size(); ++i)
+        {
+            vkDestroyBuffer(device, es.xrUbos[i], nullptr);
+            vkFreeMemory(device, es.xrUbosMem[i], nullptr);
+        }
+        for (auto &t : es.pbr)
+            destroyTexture(t);
+        if (es.ib)
+            vkDestroyBuffer(device, es.ib, nullptr);
+        if (es.ibMem)
+            vkFreeMemory(device, es.ibMem, nullptr);
+        if (es.vb)
+            vkDestroyBuffer(device, es.vb, nullptr);
+        if (es.vbMem)
+            vkFreeMemory(device, es.vbMem, nullptr);
+    }
+    extraSlots.clear();
+
     cleanupSwapchain();
 
-    if (graphicsPipeline) vkDestroyPipeline(device, graphicsPipeline, nullptr);
-    if (pipelineLayout) vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
-    if (renderPass) vkDestroyRenderPass(device, renderPass, nullptr);
+    if (graphicsPipeline)
+        vkDestroyPipeline(device, graphicsPipeline, nullptr);
+    if (pipelineLayout)
+        vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
+    if (renderPass)
+        vkDestroyRenderPass(device, renderPass, nullptr);
 
-    for (size_t i = 0; i < uniformBuffers.size(); ++i) {
+    for (size_t i = 0; i < uniformBuffers.size(); ++i)
+    {
         vkDestroyBuffer(device, uniformBuffers[i], nullptr);
         vkFreeMemory(device, uniformBuffersMemory[i], nullptr);
     }
 
-    for (auto &tex : pbrTextures) destroyTexture(tex);
-    if (textureSampler) vkDestroySampler(device, textureSampler, nullptr);
+    for (auto &tex : pbrTextures)
+        destroyTexture(tex);
+    if (textureSampler)
+        vkDestroySampler(device, textureSampler, nullptr);
 
-    if (descriptorPool) vkDestroyDescriptorPool(device, descriptorPool, nullptr);
+    if (descriptorPool)
+        vkDestroyDescriptorPool(device, descriptorPool, nullptr);
     if (descriptorSetLayout)
         vkDestroyDescriptorSetLayout(device, descriptorSetLayout, nullptr);
 
-    if (indexBuffer) vkDestroyBuffer(device, indexBuffer, nullptr);
-    if (indexBufferMemory) vkFreeMemory(device, indexBufferMemory, nullptr);
-    if (vertexBuffer) vkDestroyBuffer(device, vertexBuffer, nullptr);
-    if (vertexBufferMemory) vkFreeMemory(device, vertexBufferMemory, nullptr);
+    if (indexBuffer)
+        vkDestroyBuffer(device, indexBuffer, nullptr);
+    if (indexBufferMemory)
+        vkFreeMemory(device, indexBufferMemory, nullptr);
+    if (vertexBuffer)
+        vkDestroyBuffer(device, vertexBuffer, nullptr);
+    if (vertexBufferMemory)
+        vkFreeMemory(device, vertexBufferMemory, nullptr);
 
     for (auto s : renderFinishedSemaphores)
         vkDestroySemaphore(device, s, nullptr);
     for (auto s : imageAvailableSemaphores)
         vkDestroySemaphore(device, s, nullptr);
-    for (auto f : inFlightFences) vkDestroyFence(device, f, nullptr);
+    for (auto f : inFlightFences)
+        vkDestroyFence(device, f, nullptr);
 
-    if (commandPool) vkDestroyCommandPool(device, commandPool, nullptr);
+    if (commandPool)
+        vkDestroyCommandPool(device, commandPool, nullptr);
 
-    if (device) vkDestroyDevice(device, nullptr);
-    if (surface) vkDestroySurfaceKHR(instance, surface, nullptr);
-    if (instance) vkDestroyInstance(instance, nullptr);
+    if (device)
+        vkDestroyDevice(device, nullptr);
+    if (surface)
+        vkDestroySurfaceKHR(instance, surface, nullptr);
+    if (instance)
+        vkDestroyInstance(instance, nullptr);
 }
 
-void Renderer::createInstance() {
+void Renderer::createInstance()
+{
     VkApplicationInfo appInfo{};
     appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
     appInfo.pApplicationName = "ForceUnleashedVR";
@@ -211,7 +281,8 @@ void Renderer::createInstance() {
     uint32_t sdlExtCount = 0;
     const char *const *sdlExts =
         SDL_Vulkan_GetInstanceExtensions(&sdlExtCount);
-    if (!sdlExts) {
+    if (!sdlExts)
+    {
         throw std::runtime_error(std::string("SDL_Vulkan_GetInstanceExtensions: ") +
                                  SDL_GetError());
     }
@@ -219,14 +290,16 @@ void Renderer::createInstance() {
 
 #ifndef NDEBUG
     validationEnabled = validationLayerAvailable();
-    if (!validationEnabled) {
+    if (!validationEnabled)
+    {
         SDL_Log("Validation layer not available; continuing without it. "
                 "(source the Vulkan SDK setup-env.sh to enable it)");
     }
 #endif
 
     std::vector<const char *> layers;
-    if (validationEnabled) {
+    if (validationEnabled)
+    {
         layers.push_back(kValidationLayer);
     }
 
@@ -238,39 +311,50 @@ void Renderer::createInstance() {
     createInfo.enabledLayerCount = static_cast<uint32_t>(layers.size());
     createInfo.ppEnabledLayerNames = layers.empty() ? nullptr : layers.data();
 
-    if (xr) {
+    if (xr)
+    {
         // OpenXR creates the instance, injecting the extensions the runtime
         // needs on top of ours (SDL surface ext + validation layers).
         instance = xr->createVulkanInstance(createInfo);
-    } else {
+    }
+    else
+    {
         vkCheck(vkCreateInstance(&createInfo, nullptr, &instance),
                 "vkCreateInstance");
     }
 }
 
-void Renderer::createSurface() {
-    if (!SDL_Vulkan_CreateSurface(window, instance, nullptr, &surface)) {
+void Renderer::createSurface()
+{
+    if (!SDL_Vulkan_CreateSurface(window, instance, nullptr, &surface))
+    {
         throw std::runtime_error(std::string("SDL_Vulkan_CreateSurface: ") +
                                  SDL_GetError());
     }
 }
 
-void Renderer::pickPhysicalDevice() {
+void Renderer::pickPhysicalDevice()
+{
     std::vector<VkPhysicalDevice> devices;
-    if (xr) {
+    if (xr)
+    {
         // OpenXR dictates which GPU drives the HMD; we must use exactly that one.
         devices.push_back(xr->getVulkanPhysicalDevice(instance));
-    } else {
+    }
+    else
+    {
         uint32_t count = 0;
         vkEnumeratePhysicalDevices(instance, &count, nullptr);
-        if (count == 0) {
+        if (count == 0)
+        {
             throw std::runtime_error("No Vulkan-capable GPU found");
         }
         devices.resize(count);
         vkEnumeratePhysicalDevices(instance, &count, devices.data());
     }
 
-    for (auto dev : devices) {
+    for (auto dev : devices)
+    {
         // Find graphics + present queue families.
         uint32_t qCount = 0;
         vkGetPhysicalDeviceQueueFamilyProperties(dev, &qCount, nullptr);
@@ -279,14 +363,17 @@ void Renderer::pickPhysicalDevice() {
 
         bool foundGraphics = false, foundPresent = false;
         uint32_t gFam = 0, pFam = 0;
-        for (uint32_t i = 0; i < qCount; ++i) {
-            if (qprops[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) {
+        for (uint32_t i = 0; i < qCount; ++i)
+        {
+            if (qprops[i].queueFlags & VK_QUEUE_GRAPHICS_BIT)
+            {
                 gFam = i;
                 foundGraphics = true;
             }
             VkBool32 present = VK_FALSE;
             vkGetPhysicalDeviceSurfaceSupportKHR(dev, i, surface, &present);
-            if (present) {
+            if (present)
+            {
                 pFam = i;
                 foundPresent = true;
             }
@@ -299,15 +386,18 @@ void Renderer::pickPhysicalDevice() {
         vkEnumerateDeviceExtensionProperties(dev, nullptr, &extCount,
                                              exts.data());
         bool hasSwapchain = false;
-        for (const auto &e : exts) {
+        for (const auto &e : exts)
+        {
             if (std::strcmp(e.extensionName, VK_KHR_SWAPCHAIN_EXTENSION_NAME) ==
-                0) {
+                0)
+            {
                 hasSwapchain = true;
                 break;
             }
         }
 
-        if (foundGraphics && foundPresent && hasSwapchain) {
+        if (foundGraphics && foundPresent && hasSwapchain)
+        {
             physicalDevice = dev;
             graphicsFamily = gFam;
             presentFamily = pFam;
@@ -322,11 +412,13 @@ void Renderer::pickPhysicalDevice() {
     throw std::runtime_error("No suitable GPU (graphics+present+swapchain)");
 }
 
-void Renderer::createLogicalDevice() {
+void Renderer::createLogicalDevice()
+{
     std::set<uint32_t> uniqueFamilies{graphicsFamily, presentFamily};
     std::vector<VkDeviceQueueCreateInfo> queueInfos;
     float priority = 1.0f;
-    for (uint32_t fam : uniqueFamilies) {
+    for (uint32_t fam : uniqueFamilies)
+    {
         VkDeviceQueueCreateInfo qi{};
         qi.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
         qi.queueFamilyIndex = fam;
@@ -347,10 +439,13 @@ void Renderer::createLogicalDevice() {
     createInfo.enabledExtensionCount = 1;
     createInfo.ppEnabledExtensionNames = deviceExts;
 
-    if (xr) {
+    if (xr)
+    {
         // OpenXR creates the device, injecting any extensions the runtime needs.
         device = xr->createVulkanDevice(physicalDevice, createInfo);
-    } else {
+    }
+    else
+    {
         vkCheck(vkCreateDevice(physicalDevice, &createInfo, nullptr, &device),
                 "vkCreateDevice");
     }
@@ -360,7 +455,8 @@ void Renderer::createLogicalDevice() {
     vkGetDeviceQueue(device, presentFamily, 0, &presentQueue);
 }
 
-void Renderer::createSwapchain() {
+void Renderer::createSwapchain()
+{
     VkSurfaceCapabilitiesKHR caps;
     vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physicalDevice, surface, &caps);
 
@@ -372,9 +468,11 @@ void Renderer::createSwapchain() {
     vkGetPhysicalDeviceSurfaceFormatsKHR(physicalDevice, surface, &fmtCount,
                                          formats.data());
     VkSurfaceFormatKHR chosen = formats[0];
-    for (const auto &f : formats) {
+    for (const auto &f : formats)
+    {
         if (f.format == VK_FORMAT_B8G8R8A8_SRGB &&
-            f.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
+            f.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR)
+        {
             chosen = f;
             break;
         }
@@ -382,9 +480,12 @@ void Renderer::createSwapchain() {
     swapchainFormat = chosen.format;
 
     // Extent.
-    if (caps.currentExtent.width != UINT32_MAX) {
+    if (caps.currentExtent.width != UINT32_MAX)
+    {
         swapchainExtent = caps.currentExtent;
-    } else {
+    }
+    else
+    {
         int w = 0, h = 0;
         SDL_GetWindowSizeInPixels(window, &w, &h);
         swapchainExtent.width =
@@ -396,7 +497,8 @@ void Renderer::createSwapchain() {
     }
 
     uint32_t imageCount = caps.minImageCount + 1;
-    if (caps.maxImageCount > 0 && imageCount > caps.maxImageCount) {
+    if (caps.maxImageCount > 0 && imageCount > caps.maxImageCount)
+    {
         imageCount = caps.maxImageCount;
     }
 
@@ -411,11 +513,14 @@ void Renderer::createSwapchain() {
     createInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
 
     uint32_t famIndices[] = {graphicsFamily, presentFamily};
-    if (graphicsFamily != presentFamily) {
+    if (graphicsFamily != presentFamily)
+    {
         createInfo.imageSharingMode = VK_SHARING_MODE_CONCURRENT;
         createInfo.queueFamilyIndexCount = 2;
         createInfo.pQueueFamilyIndices = famIndices;
-    } else {
+    }
+    else
+    {
         createInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
     }
 
@@ -436,7 +541,8 @@ void Renderer::createSwapchain() {
 
 VkImageView Renderer::createImageView(VkImage image, VkFormat format,
                                       VkImageAspectFlags aspect,
-                                      uint32_t mipLevels) {
+                                      uint32_t mipLevels)
+{
     VkImageViewCreateInfo info{};
     info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
     info.image = image;
@@ -452,9 +558,11 @@ VkImageView Renderer::createImageView(VkImage image, VkFormat format,
     return view;
 }
 
-void Renderer::createImageViews() {
+void Renderer::createImageViews()
+{
     swapchainImageViews.resize(swapchainImages.size());
-    for (size_t i = 0; i < swapchainImages.size(); ++i) {
+    for (size_t i = 0; i < swapchainImages.size(); ++i)
+    {
         swapchainImageViews[i] = createImageView(
             swapchainImages[i], swapchainFormat, VK_IMAGE_ASPECT_COLOR_BIT, 1);
     }
@@ -465,7 +573,8 @@ void Renderer::createImage(uint32_t width, uint32_t height, uint32_t mipLevels,
                            VkImageUsageFlags usage,
                            VkMemoryPropertyFlags props, VkImage &image,
                            VkDeviceMemory &memory,
-                           VkSampleCountFlagBits samples) {
+                           VkSampleCountFlagBits samples)
+{
     VkImageCreateInfo imageInfo{};
     imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     imageInfo.imageType = VK_IMAGE_TYPE_2D;
@@ -496,7 +605,8 @@ void Renderer::createImage(uint32_t width, uint32_t height, uint32_t mipLevels,
     vkBindImageMemory(device, image, memory, 0);
 }
 
-void Renderer::createMsaaColorResources() {
+void Renderer::createMsaaColorResources()
+{
     createImage(swapchainExtent.width, swapchainExtent.height, 1,
                 swapchainFormat, VK_IMAGE_TILING_OPTIMAL,
                 VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT |
@@ -508,7 +618,8 @@ void Renderer::createMsaaColorResources() {
     msaaColor.mipLevels = 1;
 }
 
-void Renderer::createDepthResources() {
+void Renderer::createDepthResources()
+{
     createImage(swapchainExtent.width, swapchainExtent.height, 1, depthFormat,
                 VK_IMAGE_TILING_OPTIMAL,
                 VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
@@ -518,7 +629,8 @@ void Renderer::createDepthResources() {
         createImageView(depthImage, depthFormat, VK_IMAGE_ASPECT_DEPTH_BIT, 1);
 }
 
-void Renderer::createRenderPass() {
+void Renderer::createRenderPass()
+{
     // Attachment 0: MSAA color (multisampled, not directly presentable)
     VkAttachmentDescription colorAttachment{};
     colorAttachment.format = swapchainFormat;
@@ -601,7 +713,8 @@ void Renderer::createRenderPass() {
             "vkCreateRenderPass");
 }
 
-void Renderer::createDescriptorSetLayout() {
+void Renderer::createDescriptorSetLayout()
+{
     // Binding 0: UBO. Bindings 1-4: base/normal/roughness/metallic samplers.
     std::array<VkDescriptorSetLayoutBinding, 5> bindings{};
 
@@ -611,7 +724,8 @@ void Renderer::createDescriptorSetLayout() {
     bindings[0].stageFlags =
         VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
 
-    for (uint32_t i = 1; i < 5; ++i) {
+    for (uint32_t i = 1; i < 5; ++i)
+    {
         bindings[i].binding = i;
         bindings[i].descriptorType =
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
@@ -629,10 +743,12 @@ void Renderer::createDescriptorSetLayout() {
             "vkCreateDescriptorSetLayout");
 }
 
-VkShaderModule Renderer::createShaderModule(const char *spvPath) {
+VkShaderModule Renderer::createShaderModule(const char *spvPath)
+{
     size_t size = 0;
     char *code = read_binary_file(spvPath, &size);
-    if (!code || size == 0) {
+    if (!code || size == 0)
+    {
         throw std::runtime_error(std::string("Failed to read shader: ") +
                                  spvPath);
     }
@@ -649,12 +765,19 @@ VkShaderModule Renderer::createShaderModule(const char *spvPath) {
     return module;
 }
 
-void Renderer::createGraphicsPipeline() {
+void Renderer::createGraphicsPipeline()
+{
     // Pipeline layout is shared by the desktop and XR pipelines.
     VkPipelineLayoutCreateInfo layoutInfo{};
     layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     layoutInfo.setLayoutCount = 1;
     layoutInfo.pSetLayouts = &descriptorSetLayout;
+    VkPushConstantRange pushRange{};
+    pushRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+    pushRange.offset = 0;
+    pushRange.size = sizeof(PushConstants);
+    layoutInfo.pushConstantRangeCount = 1;
+    layoutInfo.pPushConstantRanges = &pushRange;
     vkCheck(vkCreatePipelineLayout(device, &layoutInfo, nullptr, &pipelineLayout),
             "vkCreatePipelineLayout");
 
@@ -662,7 +785,8 @@ void Renderer::createGraphicsPipeline() {
 }
 
 VkPipeline Renderer::buildPipeline(VkRenderPass rp,
-                                   VkSampleCountFlagBits samples) {
+                                   VkSampleCountFlagBits samples)
+{
     VkShaderModule vert = createShaderModule(SHADER_DIR "/model.vert.spv");
     VkShaderModule frag = createShaderModule(SHADER_DIR "/model.frag.spv");
 
@@ -792,9 +916,11 @@ VkPipeline Renderer::buildPipeline(VkRenderPass rp,
     return pipeline;
 }
 
-void Renderer::createFramebuffers() {
+void Renderer::createFramebuffers()
+{
     framebuffers.resize(swapchainImageViews.size());
-    for (size_t i = 0; i < swapchainImageViews.size(); ++i) {
+    for (size_t i = 0; i < swapchainImageViews.size(); ++i)
+    {
         std::array<VkImageView, 3> attachments = {
             msaaColor.view, depthImageView, swapchainImageViews[i]};
         VkFramebufferCreateInfo info{};
@@ -810,7 +936,8 @@ void Renderer::createFramebuffers() {
     }
 }
 
-void Renderer::createCommandPool() {
+void Renderer::createCommandPool()
+{
     VkCommandPoolCreateInfo info{};
     info.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
     info.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
@@ -820,12 +947,15 @@ void Renderer::createCommandPool() {
 }
 
 uint32_t Renderer::findMemoryType(uint32_t typeFilter,
-                                  VkMemoryPropertyFlags props) {
+                                  VkMemoryPropertyFlags props)
+{
     VkPhysicalDeviceMemoryProperties memProps;
     vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProps);
-    for (uint32_t i = 0; i < memProps.memoryTypeCount; ++i) {
+    for (uint32_t i = 0; i < memProps.memoryTypeCount; ++i)
+    {
         if ((typeFilter & (1u << i)) &&
-            (memProps.memoryTypes[i].propertyFlags & props) == props) {
+            (memProps.memoryTypes[i].propertyFlags & props) == props)
+        {
             return i;
         }
     }
@@ -834,7 +964,8 @@ uint32_t Renderer::findMemoryType(uint32_t typeFilter,
 
 void Renderer::createBuffer(VkDeviceSize size, VkBufferUsageFlags usage,
                             VkMemoryPropertyFlags props, VkBuffer &buffer,
-                            VkDeviceMemory &memory) {
+                            VkDeviceMemory &memory)
+{
     VkBufferCreateInfo info{};
     info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     info.size = size;
@@ -854,7 +985,8 @@ void Renderer::createBuffer(VkDeviceSize size, VkBufferUsageFlags usage,
     vkBindBufferMemory(device, buffer, memory, 0);
 }
 
-VkCommandBuffer Renderer::beginSingleTimeCommands() {
+VkCommandBuffer Renderer::beginSingleTimeCommands()
+{
     VkCommandBufferAllocateInfo allocInfo{};
     allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
     allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
@@ -871,7 +1003,8 @@ VkCommandBuffer Renderer::beginSingleTimeCommands() {
     return cmd;
 }
 
-void Renderer::endSingleTimeCommands(VkCommandBuffer cmd) {
+void Renderer::endSingleTimeCommands(VkCommandBuffer cmd)
+{
     vkEndCommandBuffer(cmd);
 
     VkSubmitInfo submit{};
@@ -884,7 +1017,8 @@ void Renderer::endSingleTimeCommands(VkCommandBuffer cmd) {
     vkFreeCommandBuffers(device, commandPool, 1, &cmd);
 }
 
-void Renderer::copyBuffer(VkBuffer src, VkBuffer dst, VkDeviceSize size) {
+void Renderer::copyBuffer(VkBuffer src, VkBuffer dst, VkDeviceSize size)
+{
     VkCommandBuffer cmd = beginSingleTimeCommands();
     VkBufferCopy region{};
     region.size = size;
@@ -894,7 +1028,8 @@ void Renderer::copyBuffer(VkBuffer src, VkBuffer dst, VkDeviceSize size) {
 
 void Renderer::transitionImageLayout(VkImage image, VkImageLayout oldLayout,
                                      VkImageLayout newLayout,
-                                     uint32_t mipLevels) {
+                                     uint32_t mipLevels)
+{
     VkCommandBuffer cmd = beginSingleTimeCommands();
 
     VkImageMemoryBarrier barrier{};
@@ -912,18 +1047,23 @@ void Renderer::transitionImageLayout(VkImage image, VkImageLayout oldLayout,
     VkPipelineStageFlags dstStage;
 
     if (oldLayout == VK_IMAGE_LAYOUT_UNDEFINED &&
-        newLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
+        newLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL)
+    {
         barrier.srcAccessMask = 0;
         barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
         srcStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
         dstStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
-    } else if (oldLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL &&
-               newLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
+    }
+    else if (oldLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL &&
+             newLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+    {
         barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
         barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
         srcStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
         dstStage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-    } else {
+    }
+    else
+    {
         throw std::runtime_error("Unsupported image layout transition");
     }
 
@@ -933,7 +1073,8 @@ void Renderer::transitionImageLayout(VkImage image, VkImageLayout oldLayout,
 }
 
 void Renderer::copyBufferToImage(VkBuffer buffer, VkImage image,
-                                 uint32_t width, uint32_t height) {
+                                 uint32_t width, uint32_t height)
+{
     VkCommandBuffer cmd = beginSingleTimeCommands();
 
     VkBufferImageCopy region{};
@@ -947,12 +1088,14 @@ void Renderer::copyBufferToImage(VkBuffer buffer, VkImage image,
 }
 
 void Renderer::generateMipmaps(VkImage image, VkFormat format, int32_t width,
-                               int32_t height, uint32_t mipLevels) {
+                               int32_t height, uint32_t mipLevels)
+{
     // Verify the format supports linear blitting.
     VkFormatProperties props;
     vkGetPhysicalDeviceFormatProperties(physicalDevice, format, &props);
     if (!(props.optimalTilingFeatures &
-          VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT)) {
+          VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT))
+    {
         // No linear blit: just transition the single (already-filled) level 0
         // and leave the rest. Treat all levels as shader-read.
         transitionImageLayout(image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
@@ -975,7 +1118,8 @@ void Renderer::generateMipmaps(VkImage image, VkFormat format, int32_t width,
     int32_t mipW = width;
     int32_t mipH = height;
 
-    for (uint32_t i = 1; i < mipLevels; ++i) {
+    for (uint32_t i = 1; i < mipLevels; ++i)
+    {
         // Transition level i-1 to transfer-src for blitting down.
         barrier.subresourceRange.baseMipLevel = i - 1;
         barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
@@ -1009,8 +1153,10 @@ void Renderer::generateMipmaps(VkImage image, VkFormat format, int32_t width,
                              VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0,
                              nullptr, 0, nullptr, 1, &barrier);
 
-        if (mipW > 1) mipW /= 2;
-        if (mipH > 1) mipH /= 2;
+        if (mipW > 1)
+            mipW /= 2;
+        if (mipH > 1)
+            mipH /= 2;
     }
 
     // Last mip level: still in transfer-dst, move to shader-read.
@@ -1027,7 +1173,8 @@ void Renderer::generateMipmaps(VkImage image, VkFormat format, int32_t width,
 }
 
 Renderer::Texture Renderer::createSolidTexture(const uint8_t rgba[4],
-                                               VkFormat format) {
+                                               VkFormat format)
+{
     Texture tex;
     tex.mipLevels = 1;
 
@@ -1063,15 +1210,18 @@ Renderer::Texture Renderer::createSolidTexture(const uint8_t rgba[4],
 
 Renderer::Texture Renderer::loadOrDefaultTexture(const std::string &path,
                                                  VkFormat format,
-                                                 const uint8_t fallback[4]) {
-    if (path.empty()) {
+                                                 const uint8_t fallback[4])
+{
+    if (path.empty())
+    {
         return createSolidTexture(fallback, format);
     }
 
     int width = 0, height = 0, channels = 0;
     stbi_uc *pixels =
         stbi_load(path.c_str(), &width, &height, &channels, STBI_rgb_alpha);
-    if (!pixels) {
+    if (!pixels)
+    {
         SDL_Log("Failed to load texture '%s' (%s); using default", path.c_str(),
                 stbi_failure_reason());
         return createSolidTexture(fallback, format);
@@ -1115,16 +1265,21 @@ Renderer::Texture Renderer::loadOrDefaultTexture(const std::string &path,
     return tex;
 }
 
-void Renderer::destroyTexture(Texture &tex) {
-    if (tex.view) vkDestroyImageView(device, tex.view, nullptr);
-    if (tex.image) vkDestroyImage(device, tex.image, nullptr);
-    if (tex.memory) vkFreeMemory(device, tex.memory, nullptr);
+void Renderer::destroyTexture(Texture &tex)
+{
+    if (tex.view)
+        vkDestroyImageView(device, tex.view, nullptr);
+    if (tex.image)
+        vkDestroyImage(device, tex.image, nullptr);
+    if (tex.memory)
+        vkFreeMemory(device, tex.memory, nullptr);
     tex.view = VK_NULL_HANDLE;
     tex.image = VK_NULL_HANDLE;
     tex.memory = VK_NULL_HANDLE;
 }
 
-void Renderer::createTextureSampler() {
+void Renderer::createTextureSampler()
+{
     VkSamplerCreateInfo info{};
     info.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
     info.magFilter = VK_FILTER_LINEAR;
@@ -1145,16 +1300,21 @@ void Renderer::createTextureSampler() {
             "vkCreateSampler");
 }
 
-void Renderer::createMeshBuffers(const Model &model) {
+void Renderer::createMeshBuffers(const Model &model)
+{
     const std::vector<Vertex> &vertices = model.vertices;
     const std::vector<uint32_t> &indices = model.indices;
     indexCount = static_cast<uint32_t>(indices.size());
 
     // Destroy any previously-uploaded mesh (LOD change / re-upload).
-    if (vertexBuffer) vkDestroyBuffer(device, vertexBuffer, nullptr);
-    if (vertexBufferMemory) vkFreeMemory(device, vertexBufferMemory, nullptr);
-    if (indexBuffer) vkDestroyBuffer(device, indexBuffer, nullptr);
-    if (indexBufferMemory) vkFreeMemory(device, indexBufferMemory, nullptr);
+    if (vertexBuffer)
+        vkDestroyBuffer(device, vertexBuffer, nullptr);
+    if (vertexBufferMemory)
+        vkFreeMemory(device, vertexBufferMemory, nullptr);
+    if (indexBuffer)
+        vkDestroyBuffer(device, indexBuffer, nullptr);
+    if (indexBufferMemory)
+        vkFreeMemory(device, indexBufferMemory, nullptr);
     vertexBuffer = VK_NULL_HANDLE;
     vertexBufferMemory = VK_NULL_HANDLE;
     indexBuffer = VK_NULL_HANDLE;
@@ -1167,7 +1327,8 @@ void Renderer::createMeshBuffers(const Model &model) {
         quantExtent.x > 0.0f ? 1.0f / quantExtent.x : 0.0f,
         quantExtent.y > 0.0f ? 1.0f / quantExtent.y : 0.0f,
         quantExtent.z > 0.0f ? 1.0f / quantExtent.z : 0.0f};
-    for (size_t i = 0; i < vertices.size(); ++i) {
+    for (size_t i = 0; i < vertices.size(); ++i)
+    {
         const Vertex &v = vertices[i];
         PackedVertex &p = packed[i];
 
@@ -1242,30 +1403,37 @@ void Renderer::createMeshBuffers(const Model &model) {
     }
 }
 
-void Renderer::updateMesh(const Model &model) {
+void Renderer::updateMesh(const Model &model)
+{
     vkDeviceWaitIdle(device);
     createMeshBuffers(model);
 }
 
-void Renderer::uploadObject(const Model &model, const TextureSet &textures) {
+void Renderer::uploadObject(const Model &model, const TextureSet &textures)
+{
     // Compute the position-dequantization bbox from this full-res model and
     // keep it for all later updateMesh() calls (simplification never grows it).
     glm::vec3 minB(std::numeric_limits<float>::max());
     glm::vec3 maxB(std::numeric_limits<float>::lowest());
-    for (const Vertex &v : model.vertices) {
+    for (const Vertex &v : model.vertices)
+    {
         minB = glm::min(minB, v.pos);
         maxB = glm::max(maxB, v.pos);
     }
-    if (model.vertices.empty()) {
+    if (model.vertices.empty())
+    {
         minB = glm::vec3(0.0f);
         maxB = glm::vec3(1.0f);
     }
     quantMin = minB;
     quantExtent = maxB - minB;
     // Guard against a zero extent on any axis (flat meshes).
-    if (quantExtent.x <= 0.0f) quantExtent.x = 1.0f;
-    if (quantExtent.y <= 0.0f) quantExtent.y = 1.0f;
-    if (quantExtent.z <= 0.0f) quantExtent.z = 1.0f;
+    if (quantExtent.x <= 0.0f)
+        quantExtent.x = 1.0f;
+    if (quantExtent.y <= 0.0f)
+        quantExtent.y = 1.0f;
+    if (quantExtent.z <= 0.0f)
+        quantExtent.z = 1.0f;
 
     createMeshBuffers(model);
 
@@ -1289,12 +1457,166 @@ void Renderer::uploadObject(const Model &model, const TextureSet &textures) {
     createDescriptorSets();
 }
 
-void Renderer::createUniformBuffers() {
+uint32_t Renderer::uploadMesh(const Model &model, const TextureSet &textures)
+{
+    // Validate device is ready (uploadObject must have been called first).
+    if (device == VK_NULL_HANDLE || textureSampler == VK_NULL_HANDLE)
+        throw std::runtime_error("uploadMesh called before renderer is fully initialised");
+
+    ExtraSlot es;
+
+    // Compute bbox for this mesh's dequantization.
+    glm::vec3 minB(std::numeric_limits<float>::max());
+    glm::vec3 maxB(std::numeric_limits<float>::lowest());
+    for (const Vertex &v : model.vertices)
+    {
+        minB = glm::min(minB, v.pos);
+        maxB = glm::max(maxB, v.pos);
+    }
+    if (model.vertices.empty())
+    {
+        minB = glm::vec3(0.0f);
+        maxB = glm::vec3(1.0f);
+    }
+    es.quantMin = minB;
+    es.quantExtent = maxB - minB;
+    if (es.quantExtent.x <= 0.0f)
+        es.quantExtent.x = 1.0f;
+    if (es.quantExtent.y <= 0.0f)
+        es.quantExtent.y = 1.0f;
+    if (es.quantExtent.z <= 0.0f)
+        es.quantExtent.z = 1.0f;
+
+    // Upload vertex/index buffers (same quantization path as slot 0).
+    {
+        // Temporarily swap the global quant fields so createMeshBuffers can run.
+        glm::vec3 savedMin = quantMin, savedExt = quantExtent;
+        quantMin = es.quantMin;
+        quantExtent = es.quantExtent;
+        // We need separate buffers; save slot-0 buffers, point globals to nulls.
+        VkBuffer savedVB = vertexBuffer, savedIB = indexBuffer;
+        VkDeviceMemory savedVBMem = vertexBufferMemory, savedIBMem = indexBufferMemory;
+        uint32_t savedIC = indexCount;
+        vertexBuffer = VK_NULL_HANDLE;
+        indexBuffer = VK_NULL_HANDLE;
+        vertexBufferMemory = VK_NULL_HANDLE;
+        indexBufferMemory = VK_NULL_HANDLE;
+        createMeshBuffers(model); // creates new vertex/index buffers in globals
+        es.vb = vertexBuffer;
+        es.vbMem = vertexBufferMemory;
+        es.ib = indexBuffer;
+        es.ibMem = indexBufferMemory;
+        es.indexCount = indexCount;
+        // Restore slot-0 buffers.
+        vertexBuffer = savedVB;
+        indexBuffer = savedIB;
+        vertexBufferMemory = savedVBMem;
+        indexBufferMemory = savedIBMem;
+        indexCount = savedIC;
+        quantMin = savedMin;
+        quantExtent = savedExt;
+    }
+
+    // Load PBR textures.
+    const uint8_t white[4] = {255, 255, 255, 255};
+    const uint8_t flatN[4] = {128, 128, 255, 255};
+    const uint8_t rough[4] = {255, 255, 255, 255};
+    const uint8_t metal[4] = {0, 0, 0, 255};
+    es.pbr[0] = loadOrDefaultTexture(textures.base, VK_FORMAT_R8G8B8A8_SRGB, white);
+    es.pbr[1] = loadOrDefaultTexture(textures.normal, VK_FORMAT_R8G8B8A8_UNORM, flatN);
+    es.pbr[2] = loadOrDefaultTexture(textures.roughness, VK_FORMAT_R8G8B8A8_UNORM, rough);
+    es.pbr[3] = loadOrDefaultTexture(textures.metallic, VK_FORMAT_R8G8B8A8_UNORM, metal);
+
+    // Create per-slot UBOs (desktop + XR).
+    const uint32_t xrSlots = xr ? kXrSlots : 0u;
+    const uint32_t totalUboSets = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT) + xrSlots;
+    const VkDeviceSize uboSize = sizeof(UniformBufferObject);
+    auto allocUbos = [&](uint32_t count,
+                         std::vector<VkBuffer> &bufs,
+                         std::vector<VkDeviceMemory> &mems,
+                         std::vector<void *> &maps)
+    {
+        bufs.resize(count);
+        mems.resize(count);
+        maps.resize(count);
+        for (uint32_t i = 0; i < count; ++i)
+        {
+            createBuffer(uboSize, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                         bufs[i], mems[i]);
+            vkMapMemory(device, mems[i], 0, uboSize, 0, &maps[i]);
+        }
+    };
+    allocUbos(MAX_FRAMES_IN_FLIGHT, es.ubos, es.ubosMem, es.ubosMapped);
+    if (xrSlots)
+        allocUbos(xrSlots, es.xrUbos, es.xrUbosMem, es.xrUbosMapped);
+
+    // Create descriptor pool + sets for this slot.
+    {
+        std::array<VkDescriptorPoolSize, 2> poolSizes{};
+        poolSizes[0] = {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, totalUboSets};
+        poolSizes[1] = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, totalUboSets * 4};
+        VkDescriptorPoolCreateInfo pi{};
+        pi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        pi.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
+        pi.pPoolSizes = poolSizes.data();
+        pi.maxSets = totalUboSets;
+        vkCheck(vkCreateDescriptorPool(device, &pi, nullptr, &es.descPool),
+                "vkCreateDescriptorPool (extra slot)");
+
+        auto allocSets = [&](std::vector<VkDescriptorSet> &sets,
+                             const std::vector<VkBuffer> &ubos,
+                             uint32_t count)
+        {
+            std::vector<VkDescriptorSetLayout> layouts(count, descriptorSetLayout);
+            VkDescriptorSetAllocateInfo ai{};
+            ai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+            ai.descriptorPool = es.descPool;
+            ai.descriptorSetCount = count;
+            ai.pSetLayouts = layouts.data();
+            sets.resize(count);
+            vkCheck(vkAllocateDescriptorSets(device, &ai, sets.data()),
+                    "vkAllocateDescriptorSets (extra slot)");
+            for (uint32_t i = 0; i < count; ++i)
+            {
+                VkDescriptorBufferInfo bi{};
+                bi.buffer = ubos[i];
+                bi.offset = 0;
+                bi.range = uboSize;
+                std::array<VkDescriptorImageInfo, 4> ii{};
+                for (int t = 0; t < 4; ++t)
+                {
+                    ii[t].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                    ii[t].imageView = es.pbr[t].view;
+                    ii[t].sampler = textureSampler;
+                }
+                std::array<VkWriteDescriptorSet, 5> wr{};
+                wr[0] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr,
+                         sets[i], 0, 0, 1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, nullptr, &bi};
+                for (int t = 0; t < 4; ++t)
+                    wr[t + 1] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr,
+                                 sets[i], static_cast<uint32_t>(t + 1), 0, 1,
+                                 VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &ii[t]};
+                vkUpdateDescriptorSets(device, static_cast<uint32_t>(wr.size()), wr.data(), 0, nullptr);
+            }
+        };
+        allocSets(es.descSets, es.ubos, MAX_FRAMES_IN_FLIGHT);
+        if (xrSlots)
+            allocSets(es.xrDescSets, es.xrUbos, xrSlots);
+    }
+
+    extraSlots.push_back(std::move(es));
+    return static_cast<uint32_t>(extraSlots.size()); // meshId = 1-based index
+}
+
+void Renderer::createUniformBuffers()
+{
     VkDeviceSize size = sizeof(UniformBufferObject);
     uniformBuffers.resize(MAX_FRAMES_IN_FLIGHT);
     uniformBuffersMemory.resize(MAX_FRAMES_IN_FLIGHT);
     uniformBuffersMapped.resize(MAX_FRAMES_IN_FLIGHT);
-    for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+    for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i)
+    {
         createBuffer(size, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
                      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
                          VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
@@ -1304,7 +1626,8 @@ void Renderer::createUniformBuffers() {
     }
 }
 
-void Renderer::createDescriptorPool() {
+void Renderer::createDescriptorPool()
+{
     std::array<VkDescriptorPoolSize, 2> poolSizes{};
     poolSizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     poolSizes[0].descriptorCount = MAX_FRAMES_IN_FLIGHT;
@@ -1320,7 +1643,8 @@ void Renderer::createDescriptorPool() {
             "vkCreateDescriptorPool");
 }
 
-void Renderer::createDescriptorSets() {
+void Renderer::createDescriptorSets()
+{
     std::vector<VkDescriptorSetLayout> layouts(MAX_FRAMES_IN_FLIGHT,
                                                descriptorSetLayout);
     VkDescriptorSetAllocateInfo alloc{};
@@ -1333,14 +1657,16 @@ void Renderer::createDescriptorSets() {
     vkCheck(vkAllocateDescriptorSets(device, &alloc, descriptorSets.data()),
             "vkAllocateDescriptorSets");
 
-    for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+    for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i)
+    {
         VkDescriptorBufferInfo bufferInfo{};
         bufferInfo.buffer = uniformBuffers[i];
         bufferInfo.offset = 0;
         bufferInfo.range = sizeof(UniformBufferObject);
 
         std::array<VkDescriptorImageInfo, 4> imageInfos{};
-        for (int t = 0; t < 4; ++t) {
+        for (int t = 0; t < 4; ++t)
+        {
             imageInfos[t].imageLayout =
                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
             imageInfos[t].imageView = pbrTextures[t].view;
@@ -1355,7 +1681,8 @@ void Renderer::createDescriptorSets() {
         writes[0].descriptorCount = 1;
         writes[0].pBufferInfo = &bufferInfo;
 
-        for (int t = 0; t < 4; ++t) {
+        for (int t = 0; t < 4; ++t)
+        {
             writes[t + 1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             writes[t + 1].dstSet = descriptorSets[i];
             writes[t + 1].dstBinding = t + 1;
@@ -1371,15 +1698,18 @@ void Renderer::createDescriptorSets() {
 
     // XR per-eye descriptor sets (allocated up front in createXrFrameResources);
     // each points at its own UBO slot and the shared PBR textures.
-    if (xr) {
-        for (uint32_t s = 0; s < kXrSlots; ++s) {
+    if (xr)
+    {
+        for (uint32_t s = 0; s < kXrSlots; ++s)
+        {
             VkDescriptorBufferInfo bufferInfo{};
             bufferInfo.buffer = xrUniformBuffers[s];
             bufferInfo.offset = 0;
             bufferInfo.range = sizeof(UniformBufferObject);
 
             std::array<VkDescriptorImageInfo, 4> imageInfos{};
-            for (int t = 0; t < 4; ++t) {
+            for (int t = 0; t < 4; ++t)
+            {
                 imageInfos[t].imageLayout =
                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
                 imageInfos[t].imageView = pbrTextures[t].view;
@@ -1394,7 +1724,8 @@ void Renderer::createDescriptorSets() {
             writes[0].descriptorCount = 1;
             writes[0].pBufferInfo = &bufferInfo;
 
-            for (int t = 0; t < 4; ++t) {
+            for (int t = 0; t < 4; ++t)
+            {
                 writes[t + 1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
                 writes[t + 1].dstSet = xrDescriptorSets[s];
                 writes[t + 1].dstBinding = t + 1;
@@ -1409,7 +1740,8 @@ void Renderer::createDescriptorSets() {
     }
 }
 
-void Renderer::createCommandBuffers() {
+void Renderer::createCommandBuffers()
+{
     commandBuffers.resize(MAX_FRAMES_IN_FLIGHT);
     VkCommandBufferAllocateInfo info{};
     info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
@@ -1420,7 +1752,8 @@ void Renderer::createCommandBuffers() {
             "vkAllocateCommandBuffers");
 }
 
-void Renderer::createSyncObjects() {
+void Renderer::createSyncObjects()
+{
     imageAvailableSemaphores.resize(MAX_FRAMES_IN_FLIGHT);
     inFlightFences.resize(MAX_FRAMES_IN_FLIGHT);
     // One render-finished semaphore per swapchain image avoids reusing a
@@ -1433,45 +1766,56 @@ void Renderer::createSyncObjects() {
     fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
     fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
 
-    for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+    for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i)
+    {
         vkCheck(vkCreateSemaphore(device, &semInfo, nullptr,
                                   &imageAvailableSemaphores[i]),
                 "vkCreateSemaphore (imageAvailable)");
         vkCheck(vkCreateFence(device, &fenceInfo, nullptr, &inFlightFences[i]),
                 "vkCreateFence");
     }
-    for (size_t i = 0; i < renderFinishedSemaphores.size(); ++i) {
+    for (size_t i = 0; i < renderFinishedSemaphores.size(); ++i)
+    {
         vkCheck(vkCreateSemaphore(device, &semInfo, nullptr,
                                   &renderFinishedSemaphores[i]),
                 "vkCreateSemaphore (renderFinished)");
     }
 }
 
-void Renderer::cleanupSwapchain() {
-    for (auto fb : framebuffers) vkDestroyFramebuffer(device, fb, nullptr);
+void Renderer::cleanupSwapchain()
+{
+    for (auto fb : framebuffers)
+        vkDestroyFramebuffer(device, fb, nullptr);
     framebuffers.clear();
 
     destroyTexture(msaaColor);
 
-    if (depthImageView) vkDestroyImageView(device, depthImageView, nullptr);
-    if (depthImage) vkDestroyImage(device, depthImage, nullptr);
-    if (depthImageMemory) vkFreeMemory(device, depthImageMemory, nullptr);
+    if (depthImageView)
+        vkDestroyImageView(device, depthImageView, nullptr);
+    if (depthImage)
+        vkDestroyImage(device, depthImage, nullptr);
+    if (depthImageMemory)
+        vkFreeMemory(device, depthImageMemory, nullptr);
     depthImageView = VK_NULL_HANDLE;
     depthImage = VK_NULL_HANDLE;
     depthImageMemory = VK_NULL_HANDLE;
 
-    for (auto v : swapchainImageViews) vkDestroyImageView(device, v, nullptr);
+    for (auto v : swapchainImageViews)
+        vkDestroyImageView(device, v, nullptr);
     swapchainImageViews.clear();
 
-    if (swapchain) vkDestroySwapchainKHR(device, swapchain, nullptr);
+    if (swapchain)
+        vkDestroySwapchainKHR(device, swapchain, nullptr);
     swapchain = VK_NULL_HANDLE;
 }
 
-void Renderer::recreateSwapchain() {
+void Renderer::recreateSwapchain()
+{
     // Wait until the window has a non-zero size (e.g. un-minimized).
     int w = 0, h = 0;
     SDL_GetWindowSizeInPixels(window, &w, &h);
-    while (w == 0 || h == 0) {
+    while (w == 0 || h == 0)
+    {
         SDL_GetWindowSizeInPixels(window, &w, &h);
         SDL_WaitEvent(nullptr);
     }
@@ -1486,7 +1830,8 @@ void Renderer::recreateSwapchain() {
     createDepthResources();
     createFramebuffers();
 
-    if (imguiInitialized) {
+    if (imguiInitialized)
+    {
         ImGui_ImplVulkan_SetMinImageCount(
             static_cast<uint32_t>(swapchainImages.size()));
     }
@@ -1497,7 +1842,8 @@ void Renderer::recreateSwapchain() {
     renderFinishedSemaphores.resize(swapchainImages.size());
     VkSemaphoreCreateInfo semInfo{};
     semInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
-    for (size_t i = 0; i < renderFinishedSemaphores.size(); ++i) {
+    for (size_t i = 0; i < renderFinishedSemaphores.size(); ++i)
+    {
         vkCheck(vkCreateSemaphore(device, &semInfo, nullptr,
                                   &renderFinishedSemaphores[i]),
                 "vkCreateSemaphore (renderFinished, recreate)");
@@ -1507,19 +1853,31 @@ void Renderer::recreateSwapchain() {
 void Renderer::updateUniformBuffer(uint32_t frame, const glm::mat4 &view,
                                    const glm::mat4 &proj,
                                    const glm::vec3 &lightDir,
-                                   const glm::vec3 &camPos) {
+                                   const glm::vec3 &camPos)
+{
     UniformBufferObject ubo{};
-    ubo.model = objectTransform;
     ubo.view = view;
     ubo.proj = proj;
     ubo.lightDir = glm::vec4(lightDir, 0.0f);
     ubo.camPos = glm::vec4(camPos, 1.0f);
+    // Slot 0
     ubo.quantMin = glm::vec4(quantMin, 0.0f);
     ubo.quantExtent = glm::vec4(quantExtent, 0.0f);
     std::memcpy(uniformBuffersMapped[frame], &ubo, sizeof(ubo));
+    // Extra slots
+    for (auto &es : extraSlots)
+    {
+        if (frame < es.ubosMapped.size())
+        {
+            ubo.quantMin = glm::vec4(es.quantMin, 0.0f);
+            ubo.quantExtent = glm::vec4(es.quantExtent, 0.0f);
+            std::memcpy(es.ubosMapped[frame], &ubo, sizeof(ubo));
+        }
+    }
 }
 
-void Renderer::recordCommandBuffer(VkCommandBuffer cmd, uint32_t imageIndex) {
+void Renderer::recordCommandBuffer(VkCommandBuffer cmd, uint32_t imageIndex)
+{
     VkCommandBufferBeginInfo begin{};
     begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     vkCheck(vkBeginCommandBuffer(cmd, &begin), "vkBeginCommandBuffer");
@@ -1552,12 +1910,44 @@ void Renderer::recordCommandBuffer(VkCommandBuffer cmd, uint32_t imageIndex) {
 
     VkBuffer vbs[] = {vertexBuffer};
     VkDeviceSize offsets[] = {0};
-    vkCmdBindVertexBuffers(cmd, 0, 1, vbs, offsets);
-    vkCmdBindIndexBuffer(cmd, indexBuffer, 0, VK_INDEX_TYPE_UINT32);
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                            pipelineLayout, 0, 1, &descriptorSets[currentFrame],
-                            0, nullptr);
-    vkCmdDrawIndexed(cmd, indexCount, 1, 0, 0, 0);
+
+    uint32_t lastMeshId = UINT32_MAX;
+    for (const DrawCall &dc : drawCalls)
+    {
+        const uint32_t mid = dc.meshId;
+        // Rebind vertex/index/descriptors only when the mesh slot changes.
+        if (mid != lastMeshId)
+        {
+            if (mid == 0)
+            {
+                vkCmdBindVertexBuffers(cmd, 0, 1, &vertexBuffer, offsets);
+                vkCmdBindIndexBuffer(cmd, indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                        pipelineLayout, 0, 1,
+                                        &descriptorSets[currentFrame], 0, nullptr);
+            }
+            else if (mid - 1 < extraSlots.size())
+            {
+                auto &es = extraSlots[mid - 1];
+                vkCmdBindVertexBuffers(cmd, 0, 1, &es.vb, offsets);
+                vkCmdBindIndexBuffer(cmd, es.ib, 0, VK_INDEX_TYPE_UINT32);
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                        pipelineLayout, 0, 1,
+                                        &es.descSets[currentFrame], 0, nullptr);
+            }
+            lastMeshId = mid;
+        }
+        const uint32_t ic =
+            (mid == 0) ? indexCount
+                       : (mid - 1 < extraSlots.size() ? extraSlots[mid - 1].indexCount : 0u);
+        if (ic == 0)
+            continue;
+
+        PushConstants pc{dc.transform};
+        vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0,
+                           sizeof(PushConstants), &pc);
+        vkCmdDrawIndexed(cmd, ic, 1, 0, 0, 0);
+    }
 
     if (ImDrawData *dd = ImGui::GetDrawData())
         ImGui_ImplVulkan_RenderDrawData(dd, cmd);
@@ -1566,38 +1956,49 @@ void Renderer::recordCommandBuffer(VkCommandBuffer cmd, uint32_t imageIndex) {
     vkCheck(vkEndCommandBuffer(cmd), "vkEndCommandBuffer");
 }
 
-VkSampleCountFlagBits Renderer::getMaxMsaaSamples() const {
+VkSampleCountFlagBits Renderer::getMaxMsaaSamples() const
+{
     return getMaxSampleCount(physicalDevice, swapchainFormat);
 }
 
-void Renderer::setMsaaSamples(VkSampleCountFlagBits samples) {
-    if (samples == msaaSamples) return;
+void Renderer::setMsaaSamples(VkSampleCountFlagBits samples)
+{
+    if (samples == msaaSamples)
+        return;
     msaaSamples = samples;
 
     vkDeviceWaitIdle(device);
 
-    if (imguiInitialized) {
+    if (imguiInitialized)
+    {
         ImGui_ImplVulkan_Shutdown();
         ImGui_ImplSDL3_Shutdown();
         ImGui::DestroyContext();
         imguiInitialized = false;
     }
 
-    for (auto fb : framebuffers) vkDestroyFramebuffer(device, fb, nullptr);
+    for (auto fb : framebuffers)
+        vkDestroyFramebuffer(device, fb, nullptr);
     framebuffers.clear();
 
     destroyTexture(msaaColor);
 
-    if (depthImageView) vkDestroyImageView(device, depthImageView, nullptr);
-    if (depthImage) vkDestroyImage(device, depthImage, nullptr);
-    if (depthImageMemory) vkFreeMemory(device, depthImageMemory, nullptr);
+    if (depthImageView)
+        vkDestroyImageView(device, depthImageView, nullptr);
+    if (depthImage)
+        vkDestroyImage(device, depthImage, nullptr);
+    if (depthImageMemory)
+        vkFreeMemory(device, depthImageMemory, nullptr);
     depthImageView = VK_NULL_HANDLE;
     depthImage = VK_NULL_HANDLE;
     depthImageMemory = VK_NULL_HANDLE;
 
-    if (graphicsPipeline) vkDestroyPipeline(device, graphicsPipeline, nullptr);
-    if (pipelineLayout) vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
-    if (renderPass) vkDestroyRenderPass(device, renderPass, nullptr);
+    if (graphicsPipeline)
+        vkDestroyPipeline(device, graphicsPipeline, nullptr);
+    if (pipelineLayout)
+        vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
+    if (renderPass)
+        vkDestroyRenderPass(device, renderPass, nullptr);
     graphicsPipeline = VK_NULL_HANDLE;
     pipelineLayout = VK_NULL_HANDLE;
     renderPass = VK_NULL_HANDLE;
@@ -1610,10 +2011,13 @@ void Renderer::setMsaaSamples(VkSampleCountFlagBits samples) {
     initImGui();
 
     // The XR pipeline/render pass also depend on the sample count; rebuild them.
-    if (xr) {
+    if (xr)
+    {
         destroyXrRenderTargets();
-        if (xrPipeline) vkDestroyPipeline(device, xrPipeline, nullptr);
-        if (xrRenderPass) vkDestroyRenderPass(device, xrRenderPass, nullptr);
+        if (xrPipeline)
+            vkDestroyPipeline(device, xrPipeline, nullptr);
+        if (xrRenderPass)
+            vkDestroyRenderPass(device, xrRenderPass, nullptr);
         xrPipeline = VK_NULL_HANDLE;
         xrRenderPass = VK_NULL_HANDLE;
         createXrRenderPass();
@@ -1622,23 +2026,24 @@ void Renderer::setMsaaSamples(VkSampleCountFlagBits samples) {
     }
 }
 
-void Renderer::initImGui() {
+void Renderer::initImGui()
+{
     ImGui::CreateContext();
     ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
 
     ImGui_ImplSDL3_InitForVulkan(window);
 
     ImGui_ImplVulkan_InitInfo initInfo{};
-    initInfo.ApiVersion          = VK_API_VERSION_1_3;
-    initInfo.Instance            = instance;
-    initInfo.PhysicalDevice      = physicalDevice;
-    initInfo.Device              = device;
-    initInfo.QueueFamily         = graphicsFamily;
-    initInfo.Queue               = graphicsQueue;
-    initInfo.DescriptorPoolSize  = 8; // ImGui manages its own pool internally (min 8)
-    initInfo.MinImageCount       = static_cast<uint32_t>(swapchainImages.size());
-    initInfo.ImageCount          = static_cast<uint32_t>(swapchainImages.size());
-    initInfo.PipelineInfoMain.RenderPass  = renderPass;
+    initInfo.ApiVersion = VK_API_VERSION_1_3;
+    initInfo.Instance = instance;
+    initInfo.PhysicalDevice = physicalDevice;
+    initInfo.Device = device;
+    initInfo.QueueFamily = graphicsFamily;
+    initInfo.Queue = graphicsQueue;
+    initInfo.DescriptorPoolSize = 8; // ImGui manages its own pool internally (min 8)
+    initInfo.MinImageCount = static_cast<uint32_t>(swapchainImages.size());
+    initInfo.ImageCount = static_cast<uint32_t>(swapchainImages.size());
+    initInfo.PipelineInfoMain.RenderPass = renderPass;
     initInfo.PipelineInfoMain.MSAASamples = msaaSamples;
     ImGui_ImplVulkan_Init(&initInfo);
 
@@ -1646,7 +2051,8 @@ void Renderer::initImGui() {
 }
 
 void Renderer::drawFrame(const glm::mat4 &view, const glm::mat4 &proj,
-                         const glm::vec3 &lightDir, const glm::vec3 &camPos) {
+                         const glm::vec3 &lightDir, const glm::vec3 &camPos)
+{
     vkWaitForFences(device, 1, &inFlightFences[currentFrame], VK_TRUE,
                     UINT64_MAX);
 
@@ -1655,10 +2061,13 @@ void Renderer::drawFrame(const glm::mat4 &view, const glm::mat4 &proj,
         device, swapchain, UINT64_MAX, imageAvailableSemaphores[currentFrame],
         VK_NULL_HANDLE, &imageIndex);
 
-    if (acquire == VK_ERROR_OUT_OF_DATE_KHR) {
+    if (acquire == VK_ERROR_OUT_OF_DATE_KHR)
+    {
         recreateSwapchain();
         return;
-    } else if (acquire != VK_SUCCESS && acquire != VK_SUBOPTIMAL_KHR) {
+    }
+    else if (acquire != VK_SUCCESS && acquire != VK_SUBOPTIMAL_KHR)
+    {
         vkCheck(acquire, "vkAcquireNextImageKHR");
     }
 
@@ -1698,10 +2107,13 @@ void Renderer::drawFrame(const glm::mat4 &view, const glm::mat4 &proj,
 
     VkResult presentResult = vkQueuePresentKHR(presentQueue, &present);
     if (presentResult == VK_ERROR_OUT_OF_DATE_KHR ||
-        presentResult == VK_SUBOPTIMAL_KHR || framebufferResized) {
+        presentResult == VK_SUBOPTIMAL_KHR || framebufferResized)
+    {
         framebufferResized = false;
         recreateSwapchain();
-    } else {
+    }
+    else
+    {
         vkCheck(presentResult, "vkQueuePresentKHR");
     }
 
@@ -1712,7 +2124,8 @@ void Renderer::drawFrame(const glm::mat4 &view, const glm::mat4 &proj,
 // OpenXR per-eye rendering
 // ---------------------------------------------------------------------------
 
-void Renderer::createXrRenderPass() {
+void Renderer::createXrRenderPass()
+{
     // Same 3-attachment MSAA layout as the desktop pass, but targeting the XR
     // swapchain color format and leaving the resolved image in
     // COLOR_ATTACHMENT_OPTIMAL (the layout the runtime expects on release).
@@ -1786,8 +2199,10 @@ void Renderer::createXrRenderPass() {
             "vkCreateRenderPass (XR)");
 }
 
-void Renderer::createXrRenderTargets() {
-    for (uint32_t e = 0; e < kEyeCount; ++e) {
+void Renderer::createXrRenderTargets()
+{
+    for (uint32_t e = 0; e < kEyeCount; ++e)
+    {
         const XrSystem::EyeSwapchain &sc = xr->eye(e);
         xrExtent[e] = {sc.width, sc.height};
 
@@ -1812,7 +2227,8 @@ void Renderer::createXrRenderTargets() {
         // One image view + framebuffer per runtime swapchain image.
         xrImageViews[e].resize(sc.images.size());
         xrFramebuffers[e].resize(sc.images.size());
-        for (size_t i = 0; i < sc.images.size(); ++i) {
+        for (size_t i = 0; i < sc.images.size(); ++i)
+        {
             xrImageViews[e][i] = createImageView(
                 sc.images[i], xrColorFormat, VK_IMAGE_ASPECT_COLOR_BIT, 1);
 
@@ -1833,31 +2249,39 @@ void Renderer::createXrRenderTargets() {
     }
 }
 
-void Renderer::destroyXrRenderTargets() {
-    for (uint32_t e = 0; e < kEyeCount; ++e) {
+void Renderer::destroyXrRenderTargets()
+{
+    for (uint32_t e = 0; e < kEyeCount; ++e)
+    {
         for (auto fb : xrFramebuffers[e])
             vkDestroyFramebuffer(device, fb, nullptr);
         xrFramebuffers[e].clear();
-        for (auto v : xrImageViews[e]) vkDestroyImageView(device, v, nullptr);
+        for (auto v : xrImageViews[e])
+            vkDestroyImageView(device, v, nullptr);
         xrImageViews[e].clear();
 
         destroyTexture(xrMsaaColor[e]);
-        if (xrDepthView[e]) vkDestroyImageView(device, xrDepthView[e], nullptr);
-        if (xrDepthImage[e]) vkDestroyImage(device, xrDepthImage[e], nullptr);
-        if (xrDepthMemory[e]) vkFreeMemory(device, xrDepthMemory[e], nullptr);
+        if (xrDepthView[e])
+            vkDestroyImageView(device, xrDepthView[e], nullptr);
+        if (xrDepthImage[e])
+            vkDestroyImage(device, xrDepthImage[e], nullptr);
+        if (xrDepthMemory[e])
+            vkFreeMemory(device, xrDepthMemory[e], nullptr);
         xrDepthView[e] = VK_NULL_HANDLE;
         xrDepthImage[e] = VK_NULL_HANDLE;
         xrDepthMemory[e] = VK_NULL_HANDLE;
     }
 }
 
-void Renderer::createXrFrameResources() {
+void Renderer::createXrFrameResources()
+{
     // Per-slot uniform buffers (frame-in-flight x eye), persistently mapped.
     VkDeviceSize size = sizeof(UniformBufferObject);
     xrUniformBuffers.resize(kXrSlots);
     xrUniformBuffersMemory.resize(kXrSlots);
     xrUniformBuffersMapped.resize(kXrSlots);
-    for (uint32_t i = 0; i < kXrSlots; ++i) {
+    for (uint32_t i = 0; i < kXrSlots; ++i)
+    {
         createBuffer(size, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
                      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
                          VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
@@ -1905,14 +2329,17 @@ void Renderer::createXrFrameResources() {
     VkFenceCreateInfo fenceInfo{};
     fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
     fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
-    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i)
+    {
         vkCheck(vkCreateFence(device, &fenceInfo, nullptr, &xrInFlightFences[i]),
                 "vkCreateFence (XR)");
     }
 }
 
 void Renderer::recordXrCommandBuffer(VkCommandBuffer cmd, uint32_t eye,
-                                     uint32_t imageIndex, VkDescriptorSet set) {
+                                     uint32_t imageIndex, VkDescriptorSet set,
+                                     uint32_t xrSlotIdx)
+{
     VkCommandBufferBeginInfo begin{};
     begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     vkCheck(vkBeginCommandBuffer(cmd, &begin), "vkBeginCommandBuffer (XR)");
@@ -1943,20 +2370,55 @@ void Renderer::recordXrCommandBuffer(VkCommandBuffer cmd, uint32_t eye,
 
     VkBuffer vbs[] = {vertexBuffer};
     VkDeviceSize offsets[] = {0};
-    vkCmdBindVertexBuffers(cmd, 0, 1, vbs, offsets);
-    vkCmdBindIndexBuffer(cmd, indexBuffer, 0, VK_INDEX_TYPE_UINT32);
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout,
-                            0, 1, &set, 0, nullptr);
-    vkCmdDrawIndexed(cmd, indexCount, 1, 0, 0, 0);
+
+    uint32_t lastMeshId = UINT32_MAX;
+    for (const DrawCall &dc : drawCalls)
+    {
+        const uint32_t mid = dc.meshId;
+        if (mid != lastMeshId)
+        {
+            if (mid == 0)
+            {
+                vkCmdBindVertexBuffers(cmd, 0, 1, &vertexBuffer, offsets);
+                vkCmdBindIndexBuffer(cmd, indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                        pipelineLayout, 0, 1, &set, 0, nullptr);
+            }
+            else if (mid - 1 < extraSlots.size())
+            {
+                auto &es = extraSlots[mid - 1];
+                vkCmdBindVertexBuffers(cmd, 0, 1, &es.vb, offsets);
+                vkCmdBindIndexBuffer(cmd, es.ib, 0, VK_INDEX_TYPE_UINT32);
+                // Extra slots have their own xrDescSets.
+                const uint32_t safeIdx =
+                    (xrSlotIdx < es.xrDescSets.size()) ? xrSlotIdx : 0u;
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                        pipelineLayout, 0, 1,
+                                        &es.xrDescSets[safeIdx], 0, nullptr);
+            }
+            lastMeshId = mid;
+        }
+        const uint32_t ic =
+            (mid == 0) ? indexCount
+                       : (mid - 1 < extraSlots.size() ? extraSlots[mid - 1].indexCount : 0u);
+        if (ic == 0)
+            continue;
+        PushConstants pc{dc.transform};
+        vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0,
+                           sizeof(PushConstants), &pc);
+        vkCmdDrawIndexed(cmd, ic, 1, 0, 0, 0);
+    }
 
     vkCmdEndRenderPass(cmd);
     vkCheck(vkEndCommandBuffer(cmd), "vkEndCommandBuffer (XR)");
 }
 
 void Renderer::renderXrFrame(XrSystem &xrSys, const PlayerRig &player,
-                             const glm::vec3 &lightDir) {
+                             const glm::vec3 &lightDir)
+{
     XrSystem::FrameState fs = xrSys.beginFrame();
-    if (!fs.shouldRender) {
+    if (!fs.shouldRender)
+    {
         xrSys.endFrame(fs, false);
         return;
     }
@@ -1970,7 +2432,8 @@ void Renderer::renderXrFrame(XrSystem &xrSys, const PlayerRig &player,
     // Acquire + record both eyes, then submit together so a single fence covers
     // the whole frame.
     std::array<VkCommandBuffer, kEyeCount> cmds{};
-    for (uint32_t eye = 0; eye < kEyeCount; ++eye) {
+    for (uint32_t eye = 0; eye < kEyeCount; ++eye)
+    {
         const uint32_t img = xrSys.acquireImage(eye);
         const uint32_t slot = frame * kEyeCount + eye;
 
@@ -1982,20 +2445,31 @@ void Renderer::renderXrFrame(XrSystem &xrSys, const PlayerRig &player,
         const glm::vec3 eyePos = glm::vec3(worldFromView[3]);
 
         UniformBufferObject ubo{};
-        ubo.model = objectTransform;
         ubo.view = view;
         ubo.proj = proj;
         ubo.lightDir = glm::vec4(lightDir, 0.0f);
         ubo.camPos = glm::vec4(eyePos, 1.0f);
+        // Slot 0
         ubo.quantMin = glm::vec4(quantMin, 0.0f);
         ubo.quantExtent = glm::vec4(quantExtent, 0.0f);
         std::memcpy(xrUniformBuffersMapped[slot], &ubo, sizeof(ubo));
+        // Extra slots
+        for (auto &es : extraSlots)
+        {
+            if (slot < es.xrUbosMapped.size())
+            {
+                ubo.quantMin = glm::vec4(es.quantMin, 0.0f);
+                ubo.quantExtent = glm::vec4(es.quantExtent, 0.0f);
+                std::memcpy(es.xrUbosMapped[slot], &ubo, sizeof(ubo));
+            }
+        }
 
         cmds[eye] = xrCommandBuffers[slot];
         vkResetCommandBuffer(cmds[eye], 0);
-        recordXrCommandBuffer(cmds[eye], eye, img, xrDescriptorSets[slot]);
+        recordXrCommandBuffer(cmds[eye], eye, img, xrDescriptorSets[slot], slot);
 
-        if (eye == 0) {
+        if (eye == 0)
+        {
             lastEyeView = view;
             lastEyeProj = proj;
             lastEyePos = eyePos;
@@ -2009,7 +2483,8 @@ void Renderer::renderXrFrame(XrSystem &xrSys, const PlayerRig &player,
     vkCheck(vkQueueSubmit(graphicsQueue, 1, &submit, xrInFlightFences[frame]),
             "vkQueueSubmit (XR)");
 
-    for (uint32_t eye = 0; eye < kEyeCount; ++eye) xrSys.releaseImage(eye);
+    for (uint32_t eye = 0; eye < kEyeCount; ++eye)
+        xrSys.releaseImage(eye);
 
     xrSys.endFrame(fs, true);
     xrCurrentFrame = (frame + 1) % MAX_FRAMES_IN_FLIGHT;

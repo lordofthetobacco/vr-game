@@ -74,11 +74,32 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(meshoptimizer)
 
+# --- Bullet3 physics (fetched from GitHub) ---
+set(BUILD_SHARED_LIBS        OFF CACHE BOOL "" FORCE)
+set(BUILD_BULLET3            OFF CACHE BOOL "" FORCE)
+set(BUILD_PYBULLET           OFF CACHE BOOL "" FORCE)
+set(BUILD_OPENGL3_DEMOS      OFF CACHE BOOL "" FORCE)
+set(BUILD_CPU_DEMOS          OFF CACHE BOOL "" FORCE)
+set(BUILD_EXTRAS             OFF CACHE BOOL "" FORCE)
+set(BUILD_UNIT_TESTS         OFF CACHE BOOL "" FORCE)
+set(BUILD_BULLET2_DEMOS      OFF CACHE BOOL "" FORCE)
+set(INSTALL_LIBS             OFF CACHE BOOL "" FORCE)
+set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
+FetchContent_Declare(
+    bullet3
+    GIT_REPOSITORY https://github.com/bulletphysics/bullet3.git
+    GIT_TAG        3.25
+    GIT_SHALLOW    TRUE
+)
+FetchContent_MakeAvailable(bullet3)
+
 add_executable(ForceUnleashedVR
     src/main.cpp
     src/io.cpp
     src/model.cpp
     src/object.cpp
+    src/scene.cpp
+    src/physics_world.cpp
     src/renderer.cpp
     src/xr.cpp
     src/stb_image_impl.cpp
@@ -88,10 +109,21 @@ target_compile_options(ForceUnleashedVR PRIVATE
     "$<$<CXX_COMPILER_ID:Clang>:-Wall;-Wextra;-Wpedantic>"
 )
 target_include_directories(ForceUnleashedVR PRIVATE ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(ForceUnleashedVR PRIVATE SDL3::SDL3 Vulkan::Vulkan assimp::assimp imgui_lib meshoptimizer OpenXR::openxr_loader OpenXR::headers)
+target_include_directories(ForceUnleashedVR PRIVATE
+    ${bullet3_SOURCE_DIR}/src
+)
+target_link_libraries(ForceUnleashedVR PRIVATE
+    SDL3::SDL3 Vulkan::Vulkan assimp::assimp imgui_lib meshoptimizer
+    OpenXR::openxr_loader OpenXR::headers
+    BulletDynamics BulletCollision LinearMath
+)
 
 # stb_image is third-party single-header code: suppress its warnings.
 set_source_files_properties(src/stb_image_impl.cpp PROPERTIES COMPILE_OPTIONS "-w")
+
+# Bullet3 generates many warnings under our strict flags — silence them.
+set_source_files_properties(src/physics_world.cpp PROPERTIES COMPILE_OPTIONS "-w")
+set_source_files_properties(src/main.cpp PROPERTIES COMPILE_OPTIONS "-Wno-missing-field-initializers")
 
 # OpenXR structs are initialized with the idiomatic `{XR_TYPE_*}` form (only the
 # .type member listed); the rest are intentionally left zero. Silence the

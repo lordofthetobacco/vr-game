@@ -4,44 +4,88 @@
 #include <fstream>
 #include <string>
 
-namespace {
+#include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/quaternion.hpp>
 
-std::string trim(const std::string &s) {
-    size_t b = s.find_first_not_of(" \t\r\n");
-    if (b == std::string::npos) return "";
-    size_t e = s.find_last_not_of(" \t\r\n");
-    return s.substr(b, e - b + 1);
-}
+namespace
+{
 
-// Strip surrounding double or single quotes if present.
-std::string unquote(const std::string &s) {
-    if (s.size() >= 2 && ((s.front() == '"' && s.back() == '"') ||
-                          (s.front() == '\'' && s.back() == '\''))) {
-        return s.substr(1, s.size() - 2);
+    std::string trim(const std::string &s)
+    {
+        size_t b = s.find_first_not_of(" \t\r\n");
+        if (b == std::string::npos)
+            return "";
+        size_t e = s.find_last_not_of(" \t\r\n");
+        return s.substr(b, e - b + 1);
     }
-    return s;
-}
+    bool parseBool(const std::string &value, bool &out)
+    {
+        if (value == "true" || value == "True" || value == "1")
+        {
+            out = true;
+            return true;
+        }
+        if (value == "false" || value == "False" || value == "0")
+        {
+            out = false;
+            return true;
+        }
+        return false;
+    }
 
-// Directory portion of a path, including the trailing slash (empty if none).
-std::string dirOf(const std::string &path) {
-    size_t slash = path.find_last_of("/\\");
-    if (slash == std::string::npos) return "";
-    return path.substr(0, slash + 1);
-}
+    bool parseFloat(const std::string &value, float &out)
+    {
+        char *end = nullptr;
+        out = std::strtof(value.c_str(), &end);
+        return end != value.c_str() && *end == '\0';
+    }
 
-// Resolve a path read from the toml relative to the toml's directory, unless it
-// is already absolute.
-std::string resolve(const std::string &dir, const std::string &p) {
-    if (p.empty()) return p;
-    if (p.front() == '/') return p; // absolute
-    return dir + p;
-}
+    // Strip surrounding double or single quotes if present.
+    std::string unquote(const std::string &s)
+    {
+        if (s.size() >= 2 && ((s.front() == '"' && s.back() == '"') ||
+                              (s.front() == '\'' && s.back() == '\'')))
+        {
+            return s.substr(1, s.size() - 2);
+        }
+        return s;
+    }
+
+    // Directory portion of a path, including the trailing slash (empty if none).
+    std::string dirOf(const std::string &path)
+    {
+        size_t slash = path.find_last_of("/\\");
+        if (slash == std::string::npos)
+            return "";
+        return path.substr(0, slash + 1);
+    }
+
+    // Resolve a path read from the toml relative to the toml's directory, unless it
+    // is already absolute.
+    std::string resolve(const std::string &dir, const std::string &p)
+    {
+        if (p.empty())
+            return p;
+        if (p.front() == '/')
+            return p; // absolute
+        return dir + p;
+    }
 
 } // namespace
 
-bool loadObjectToml(const char *path, ObjectDef &out) {
+glm::mat4 transformToMatrix(const Transform &transform)
+{
+    glm::mat4 model = glm::translate(glm::mat4(1.0f), transform.position);
+    model *= glm::mat4_cast(transform.rotation);
+    model = glm::scale(model, transform.scale);
+    return model;
+}
+
+bool loadObjectToml(const char *path, ObjectDef &out)
+{
     std::ifstream file(path);
-    if (!file) {
+    if (!file)
+    {
         fprintf(stderr, "Could not open object file: %s\n", path);
         return false;
     }
@@ -50,39 +94,104 @@ bool loadObjectToml(const char *path, ObjectDef &out) {
     std::string section;
     std::string line;
 
-    while (std::getline(file, line)) {
+    while (std::getline(file, line))
+    {
         // Strip comments (# to end of line).
         size_t hash = line.find('#');
-        if (hash != std::string::npos) line = line.substr(0, hash);
+        if (hash != std::string::npos)
+            line = line.substr(0, hash);
 
         line = trim(line);
-        if (line.empty()) continue;
+        if (line.empty())
+            continue;
 
         // Section header: [name]
-        if (line.front() == '[' && line.back() == ']') {
+        if (line.front() == '[' && line.back() == ']')
+        {
             section = trim(line.substr(1, line.size() - 2));
             continue;
         }
 
         size_t eq = line.find('=');
-        if (eq == std::string::npos) continue;
+        if (eq == std::string::npos)
+            continue;
 
         std::string key = trim(line.substr(0, eq));
         std::string value = unquote(trim(line.substr(eq + 1)));
-        if (value.empty()) continue;
+        if (value.empty())
+            continue;
 
-        if (section.empty() && key == "model") {
+        if (section.empty() && key == "model")
+        {
             out.modelPath = resolve(baseDir, value);
-        } else if (section == "textures") {
-            if (key == "base") out.base = resolve(baseDir, value);
-            else if (key == "normal") out.normal = resolve(baseDir, value);
-            else if (key == "roughness") out.roughness = resolve(baseDir, value);
-            else if (key == "metallic") out.metallic = resolve(baseDir, value);
+        }
+        else if (section == "textures")
+        {
+            if (key == "base")
+                out.base = resolve(baseDir, value);
+            else if (key == "normal")
+                out.normal = resolve(baseDir, value);
+            else if (key == "roughness")
+                out.roughness = resolve(baseDir, value);
+            else if (key == "metallic")
+                out.metallic = resolve(baseDir, value);
+        }
+        else if (section == "hands")
+        {
+            if (key == "enabled")
+            {
+                bool enabled = out.handsEnabled;
+                if (parseBool(value, enabled))
+                    out.handsEnabled = enabled;
+            }
+            else if (key == "radius")
+            {
+                float radius = out.handsRadius;
+                if (parseFloat(value, radius))
+                    out.handsRadius = radius;
+            }
+            else if (key == "offset_x")
+            {
+                float v = out.handsOffset.x;
+                if (parseFloat(value, v))
+                    out.handsOffset.x = v;
+            }
+            else if (key == "offset_y")
+            {
+                float v = out.handsOffset.y;
+                if (parseFloat(value, v))
+                    out.handsOffset.y = v;
+            }
+            else if (key == "offset_z")
+            {
+                float v = out.handsOffset.z;
+                if (parseFloat(value, v))
+                    out.handsOffset.z = v;
+            }
+            else if (key == "rotation_x")
+            {
+                float v = out.handsRotationDeg.x;
+                if (parseFloat(value, v))
+                    out.handsRotationDeg.x = v;
+            }
+            else if (key == "rotation_y")
+            {
+                float v = out.handsRotationDeg.y;
+                if (parseFloat(value, v))
+                    out.handsRotationDeg.y = v;
+            }
+            else if (key == "rotation_z")
+            {
+                float v = out.handsRotationDeg.z;
+                if (parseFloat(value, v))
+                    out.handsRotationDeg.z = v;
+            }
         }
     }
 
     // All five keys are required.
-    struct {
+    struct
+    {
         const char *name;
         const std::string &value;
     } required[] = {
@@ -94,8 +203,10 @@ bool loadObjectToml(const char *path, ObjectDef &out) {
     };
 
     bool ok = true;
-    for (const auto &r : required) {
-        if (r.value.empty()) {
+    for (const auto &r : required)
+    {
+        if (r.value.empty())
+        {
             fprintf(stderr, "Object file '%s' is missing required key '%s'\n",
                     path, r.name);
             ok = false;

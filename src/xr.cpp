@@ -622,24 +622,34 @@ void XrSystem::createInput()
         }
     };
 
-    // Valve Index: thumbstick + trackpad, trigger.
+    // Valve Index: thumbstick + trackpad, trigger/squeeze.
     suggest("/interaction_profiles/valve/index_controller",
             {{poseAction, "/user/hand/left/input/grip/pose"},
              {poseAction, "/user/hand/right/input/grip/pose"},
              {moveAction, "/user/hand/left/input/thumbstick"},
              {turnAction, "/user/hand/right/input/thumbstick"},
              {selectAction, "/user/hand/right/input/trigger/click"},
+             {selectAction, "/user/hand/right/input/trigger/value"},
              {grabAction, "/user/hand/left/input/trigger/click"},
-             {grabAction, "/user/hand/right/input/trigger/click"}});
+             {grabAction, "/user/hand/right/input/trigger/click"},
+             {grabAction, "/user/hand/left/input/trigger/value"},
+             {grabAction, "/user/hand/right/input/trigger/value"},
+             {grabAction, "/user/hand/left/input/squeeze/click"},
+             {grabAction, "/user/hand/right/input/squeeze/click"},
+             {grabAction, "/user/hand/left/input/squeeze/value"},
+             {grabAction, "/user/hand/right/input/squeeze/value"}});
     // Oculus Touch.
     suggest("/interaction_profiles/oculus/touch_controller",
             {{poseAction, "/user/hand/left/input/grip/pose"},
              {poseAction, "/user/hand/right/input/grip/pose"},
              {moveAction, "/user/hand/left/input/thumbstick"},
              {turnAction, "/user/hand/right/input/thumbstick"},
+             {selectAction, "/user/hand/right/input/trigger/click"},
              {selectAction, "/user/hand/right/input/trigger/value"},
-             {grabAction, "/user/hand/left/input/trigger/value"},
-             {grabAction, "/user/hand/right/input/trigger/value"}});
+             {grabAction, "/user/hand/left/input/squeeze/click"},
+             {grabAction, "/user/hand/right/input/squeeze/click"},
+             {grabAction, "/user/hand/left/input/squeeze/value"},
+             {grabAction, "/user/hand/right/input/squeeze/value"}});
     // HTC Vive (trackpad, no thumbstick).
     suggest("/interaction_profiles/htc/vive_controller",
             {{poseAction, "/user/hand/left/input/grip/pose"},
@@ -647,8 +657,11 @@ void XrSystem::createInput()
              {moveAction, "/user/hand/left/input/trackpad"},
              {turnAction, "/user/hand/right/input/trackpad"},
              {selectAction, "/user/hand/right/input/trigger/click"},
+             {selectAction, "/user/hand/right/input/trigger/value"},
              {grabAction, "/user/hand/left/input/trigger/click"},
-             {grabAction, "/user/hand/right/input/trigger/click"}});
+             {grabAction, "/user/hand/right/input/trigger/click"},
+             {grabAction, "/user/hand/left/input/trigger/value"},
+             {grabAction, "/user/hand/right/input/trigger/value"}});
     // KHR simple controller (fallback; no thumbstick — pose + select only).
     suggest("/interaction_profiles/khr/simple_controller",
             {{poseAction, "/user/hand/left/input/grip/pose"},

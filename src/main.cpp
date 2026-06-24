@@ -1,14 +1,18 @@
 #include <algorithm>
+#include <array>
 #include <cstdio>
 #include <cstring>
 #include <exception>
+#include <optional>
 #include <string>
+#include <vector>
 
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_vulkan.h>
 
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/quaternion.hpp>
 
 #include <imgui.h>
 #include <imgui_impl_sdl3.h>
@@ -16,9 +20,14 @@
 
 #include "include/model.hpp"
 #include "include/object.hpp"
+#include "include/physics_world.hpp"
 #include "include/player.hpp"
 #include "include/renderer.hpp"
+#include "include/scene.hpp"
 #include "include/xr.hpp"
+
+// Bullet3 needed only for CF_KINEMATIC_OBJECT flag manipulation on grab/release.
+#include <btBulletDynamicsCommon.h>
 
 namespace
 {
@@ -28,13 +37,32 @@ namespace
         return ls >= lf && std::strcmp(s + ls - lf, suffix) == 0;
     }
 
-    // Place a model at an explicit world position with a pre-computed scale.
-    glm::mat4 placeModelAt(const glm::vec3 &worldPos, float scale,
-                           const glm::vec3 &center)
+    // Detect whether a .toml file is a scene file (has [[objects]]) vs a
+    // single-object file.
+    bool isSceneToml(const char *path)
     {
-        glm::mat4 m = glm::translate(glm::mat4(1.0f), worldPos);
-        m = glm::scale(m, glm::vec3(scale));
-        m = glm::translate(m, -center);
+        std::FILE *f = std::fopen(path, "r");
+        if (!f)
+            return false;
+        char buf[256];
+        while (std::fgets(buf, sizeof(buf), f))
+        {
+            // Detect [objects.name] dictionary format or old [[objects]] array.
+            if (std::strstr(buf, "[objects.") || std::strstr(buf, "[[objects]]"))
+            {
+                std::fclose(f);
+                return true;
+            }
+        }
+        std::fclose(f);
+        return false;
+    }
+
+    // Convert a scene object's transform component to a renderable model matrix.
+    glm::mat4 entityMatrix(const Entity &e)
+    {
+        glm::mat4 m = transformToMatrix(e.transform);
+        m = glm::translate(m, -e.center);
         return m;
     }
 
@@ -46,6 +74,22 @@ namespace
         proj[1][1] *= -1.0f;
         return proj;
     }
+
+    // Spawn an object a fixed distance in front of the current eye pose.
+    glm::vec3 placeInFrontOfEye(const glm::vec3 &eyePos, const glm::mat4 &view,
+                                float distance, float verticalOffset)
+    {
+        const glm::mat4 worldFromEye = glm::inverse(view);
+        glm::vec3 forward = -glm::vec3(worldFromEye[2]);
+        forward.y = 0.0f;
+        const float forwardLen = glm::length(forward);
+        if (forwardLen < 0.0001f)
+            forward = glm::vec3(0.0f, 0.0f, -1.0f);
+        else
+            forward /= forwardLen;
+        return eyePos + forward * distance +
+               glm::vec3(0.0f, verticalOffset, 0.0f);
+    }
 } // namespace
 
 int main(int argc, char *argv[])
@@ -53,33 +97,73 @@ int main(int argc, char *argv[])
     if (argc < 2)
     {
         fprintf(stderr,
-                "Usage: %s <model.obj|.fbx|.glb|.gltf | object.toml>\n",
+                "Usage: %s <model.obj|.fbx|.glb|.gltf | object.toml | scene.toml>\n",
                 argv[0]);
         return 1;
     }
 
-    // A .toml describes a model plus the four PBR maps; any other path is a raw
-    // model rendered with default (matte) textures.
-    std::string modelPath = argv[1];
-    TextureSet textures;
-    if (endsWith(argv[1], ".toml"))
+    // --- Load scene definition -----------------------------------------------
+    // If it's a scene TOML (has [[objects]]) use the new loader;
+    // otherwise fall back to the single-object path (backward compat).
+    SceneDef sceneDef;
+    if (endsWith(argv[1], ".toml") && isSceneToml(argv[1]))
     {
-        ObjectDef def;
-        if (!loadObjectToml(argv[1], def))
-        {
+        if (!loadSceneToml(argv[1], sceneDef))
             return 1;
+    }
+    else
+    {
+        // Legacy path: single-object file or bare model.
+        std::string modelPath = argv[1];
+        ObjectDef objectDef;
+        if (endsWith(argv[1], ".toml"))
+        {
+            if (!loadObjectToml(argv[1], objectDef))
+                return 1;
+            modelPath = objectDef.modelPath;
         }
-        modelPath = def.modelPath;
-        textures.base = def.base;
-        textures.normal = def.normal;
-        textures.roughness = def.roughness;
-        textures.metallic = def.metallic;
+        // Build HandsDef from ObjectDef fields (backward compat).
+        HandsDef hands;
+        hands.enabled = objectDef.handsEnabled;
+        hands.radius = objectDef.handsRadius;
+        hands.offset = objectDef.handsOffset;
+        hands.rotationDeg = objectDef.handsRotationDeg;
+        sceneDef = sceneFromObjectDef(
+            modelPath,
+            objectDef.base, objectDef.normal,
+            objectDef.roughness, objectDef.metallic,
+            hands);
     }
 
-    Model model;
-    if (!loadModel(modelPath.c_str(), model))
+    if (sceneDef.objects.empty())
     {
+        fprintf(stderr, "Scene has no objects.\n");
         return 1;
+    }
+
+    // --- Load models ----------------------------------------------------------
+    // Primary model (first object in scene) is loaded first.
+    std::vector<Model> models(sceneDef.objects.size());
+    for (size_t i = 0; i < sceneDef.objects.size(); ++i)
+    {
+        if (!loadModel(sceneDef.objects[i].modelPath.c_str(), models[i]))
+        {
+            fprintf(stderr, "Failed to load model: %s\n",
+                    sceneDef.objects[i].modelPath.c_str());
+            return 1;
+        }
+    }
+
+    // Optional hand mesh.
+    std::optional<Model> handModel;
+    if (!sceneDef.hands.modelPath.empty())
+    {
+        Model hm;
+        if (loadModel(sceneDef.hands.modelPath.c_str(), hm))
+            handModel = std::move(hm);
+        else
+            SDL_Log("Hand model '%s' failed to load; using proxy fallback.",
+                    sceneDef.hands.modelPath.c_str());
     }
 
     if (!SDL_Init(SDL_INIT_VIDEO))
@@ -98,42 +182,171 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    // OpenXR: create() returns false when no runtime/HMD is reachable, in which
-    // case the app runs desktop-only with a free-look FPS camera.
     XrSystem xr;
     const bool vrAvailable = xr.create();
-
-    // The player rig: spawns at the stage origin facing -Z (toward the model).
     PlayerRig player;
-
-    // Light travelling downward (from above) with a slight angle so the shading
-    // reads as 3D rather than flat-on-top.
     const glm::vec3 lightDir = glm::normalize(glm::vec3(-0.3f, -1.0f, -0.3f));
 
     try
     {
         Renderer renderer(window, vrAvailable ? &xr : nullptr);
-        renderer.uploadObject(model, textures);
 
-        // Drop the model ~1.5 m in front of spawn at roughly eye height, scaled
-        // so its bounding sphere is ~0.5 m across.
+        // Upload primary object (slot 0).
+        const EntityDef &mainDef = sceneDef.objects[0];
+        TextureSet mainTex{mainDef.texBase, mainDef.texNormal,
+                           mainDef.texRoughness, mainDef.texMetallic};
+        renderer.uploadObject(models[0], mainTex);
+
+        // Upload additional meshes (slots 1+).
+        std::vector<uint32_t> meshIds(sceneDef.objects.size(), 0u);
+        for (size_t i = 1; i < sceneDef.objects.size(); ++i)
+        {
+            const EntityDef &def = sceneDef.objects[i];
+            TextureSet tex{def.texBase, def.texNormal,
+                           def.texRoughness, def.texMetallic};
+            meshIds[i] = renderer.uploadMesh(models[i], tex);
+        }
+
+        // Hand mesh slot (if loaded).
+        uint32_t handMeshId = 0; // default: reuse slot 0 (proxy fallback)
+        if (handModel)
+        {
+            TextureSet emptyTex;
+            handMeshId = renderer.uploadMesh(*handModel, emptyTex);
+        }
+
+        // --- Physics ----------------------------------------------------------
+        PhysicsWorld physicsWorld(sceneDef.gravityY);
+        float physicsAccumulator = 0.0f;
+
+        // --- Build runtime entities -------------------------------------------
         static constexpr float kObjectDesiredRadius = 0.5f;
         static constexpr float kGrabRange = 0.35f;
-        const float objectScale =
-            model.radius > 0.0001f ? kObjectDesiredRadius / model.radius : 1.0f;
-        glm::vec3 objectWorldPos{0.0f, 1.2f, -1.5f};
-        bool objectGrabbed = false;
-        auto grabbingHand = XrSystem::Hand::Right;
+        static constexpr float kObjectSpawnDistance = 1.5f;
+        static constexpr float kObjectSpawnVerticalOffset = -0.25f;
+        static constexpr int kXrStartupPlacementFrames = 45;
+
+        std::vector<Entity> entities;
+        entities.reserve(sceneDef.objects.size());
+        for (size_t i = 0; i < sceneDef.objects.size(); ++i)
+        {
+            const EntityDef &def = sceneDef.objects[i];
+            Entity e;
+            e.id = def.id;
+            e.meshId = meshIds[i];
+            e.center = models[i].center;
+            e.grabbable = def.grabbable;
+            e.visible = true;
+            e.rigidbody = def.rigidbody;
+
+            // Compute spawn scale: normalise bounding sphere to kObjectDesiredRadius.
+            const float s = models[i].radius > 0.0001f
+                                ? kObjectDesiredRadius / models[i].radius
+                                : 1.0f;
+            e.transform.position = def.position;
+            e.transform.rotation = glm::quat(glm::radians(def.rotationDeg));
+            e.transform.scale = glm::vec3(def.scale * s);
+
+            // Register physics body if component present.
+            if (e.rigidbody && e.rigidbody->enabled)
+                physicsWorld.addBody(e, *e.rigidbody,
+                                     e.collider ? &*e.collider : nullptr,
+                                     &models[i]);
+
+            entities.push_back(std::move(e));
+        }
+
+        // Hand indicator entities (indices entities.size(), +1).
+        const size_t kLeftHandIdx = entities.size();
+        const size_t kRightHandIdx = entities.size() + 1;
+        const HandsDef &hands = sceneDef.hands;
+        const float handScale = (models[0].radius > 0.0001f && hands.enabled)
+                                    ? hands.radius / models[0].radius
+                                    : 0.0f;
+        for (int hi = 0; hi < 2; ++hi)
+        {
+            Entity hEnt;
+            hEnt.id = (hi == 0) ? "hand_left" : "hand_right";
+            hEnt.meshId = handMeshId;
+            hEnt.center = handModel ? handModel->center : models[0].center;
+            hEnt.visible = false;
+            hEnt.grabbable = false;
+            hEnt.transform.position = {0.0f, -1000.0f, 0.0f};
+            hEnt.transform.rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+            hEnt.transform.scale = glm::vec3(handScale);
+            entities.push_back(std::move(hEnt));
+        }
+
+        // Kinematic hand physics colliders (sphere).
+        void *handPhysicsBody[2] = {nullptr, nullptr};
+        if (hands.enabled)
+        {
+            handPhysicsBody[0] = physicsWorld.addKinematicSphere(hands.radius);
+            handPhysicsBody[1] = physicsWorld.addKinematicSphere(hands.radius);
+        }
+
+        int xrPlacementFramesRemaining =
+            vrAvailable ? kXrStartupPlacementFrames : 0;
+
+        // Grab state (tracks one grabbed object at a time).
+        int grabbedEntityIdx = -1;
+        int grabbingHandIdx = -1;
         glm::vec3 grabHandOffset{0.0f};
 
-        renderer.setObjectTransform(
-            placeModelAt(objectWorldPos, objectScale, model.center));
+        bool showHandIndicators = true;
+        std::array<glm::vec3, 2> handIndicatorPos{
+            glm::vec3(0.0f), glm::vec3(0.0f)};
+        std::array<glm::quat, 2> handIndicatorRot{
+            glm::quat(1.0f, 0.0f, 0.0f, 0.0f),
+            glm::quat(1.0f, 0.0f, 0.0f, 0.0f)};
+        std::array<bool, 2> handIndicatorValid{false, false};
 
-        bool quit = false;
-        bool dragging = false;
+        const glm::quat handRotOffset =
+            glm::quat(glm::radians(hands.rotationDeg));
+
+        auto buildDrawCalls = [&](bool xrRunning) -> std::vector<DrawCall>
+        {
+            std::vector<DrawCall> calls;
+            calls.reserve(entities.size());
+            for (size_t i = 0; i < entities.size(); ++i)
+            {
+                const auto &e = entities[i];
+                // Hand indicator entities are handled below.
+                if (i == kLeftHandIdx || i == kRightHandIdx)
+                    continue;
+                if (e.visible)
+                    calls.push_back({e.meshId, entityMatrix(e)});
+            }
+            if (xrRunning && showHandIndicators && hands.enabled)
+            {
+                for (int hi = 0; hi < 2; ++hi)
+                {
+                    size_t idx = (hi == 0) ? kLeftHandIdx : kRightHandIdx;
+                    if (handIndicatorValid[hi])
+                    {
+                        entities[idx].visible = true;
+                        entities[idx].transform.position =
+                            handIndicatorPos[hi] +
+                            handIndicatorRot[hi] * hands.offset;
+                        entities[idx].transform.rotation =
+                            handIndicatorRot[hi] * handRotOffset;
+                        calls.push_back({entities[idx].meshId,
+                                         entityMatrix(entities[idx])});
+                    }
+                    else
+                    {
+                        entities[idx].visible = false;
+                    }
+                }
+            }
+            return calls;
+        };
+
+        renderer.setDrawCalls(buildDrawCalls(false));
+
+        bool quit = false, dragging = false;
         SDL_Event e;
 
-        // Build the list of MSAA options the hardware supports.
         const VkSampleCountFlagBits hwMax = renderer.getMaxMsaaSamples();
         struct MsaaOption
         {
@@ -152,7 +365,6 @@ int main(int argc, char *argv[])
                 msaaOptionCount++;
         msaaOptionCount = std::min(msaaOptionCount,
                                    static_cast<int>(std::size(msaaOptions)));
-
         auto sampleToIndex = [&](VkSampleCountFlagBits c)
         {
             for (int i = 0; i < msaaOptionCount; ++i)
@@ -160,15 +372,13 @@ int main(int argc, char *argv[])
                     return i;
             return 0;
         };
-
         int msaaSelected = sampleToIndex(renderer.getMsaaSamples());
         VkSampleCountFlagBits pendingMsaa = VK_SAMPLE_COUNT_FLAG_BITS_MAX_ENUM;
 
-        // Mesh LOD state.
-        float lodRatio = 1.0f;
-        float lodError = 0.02f;
+        float lodRatio = 1.0f, lodError = 0.02f;
         bool pendingLod = false;
         Model lodModel;
+        bool leftGrabGesture = false, rightGrabGesture = false;
 
         uint64_t prevTicks = SDL_GetTicks();
 
@@ -180,16 +390,13 @@ int main(int argc, char *argv[])
                 msaaSelected = sampleToIndex(renderer.getMsaaSamples());
                 pendingMsaa = VK_SAMPLE_COUNT_FLAG_BITS_MAX_ENUM;
             }
-
             if (pendingLod)
             {
                 if (lodRatio >= 0.999f)
-                {
-                    renderer.updateMesh(model);
-                }
+                    renderer.updateMesh(models[0]);
                 else
                 {
-                    simplifyModel(model, lodRatio, lodError, lodModel);
+                    simplifyModel(models[0], lodRatio, lodError, lodModel);
                     renderer.updateMesh(lodModel);
                 }
                 pendingLod = false;
@@ -198,7 +405,6 @@ int main(int argc, char *argv[])
             while (SDL_PollEvent(&e))
             {
                 ImGui_ImplSDL3_ProcessEvent(&e);
-
                 switch (e.type)
                 {
                 case SDL_EVENT_QUIT:
@@ -208,17 +414,16 @@ int main(int argc, char *argv[])
                     if (e.key.key == SDLK_ESCAPE)
                         quit = true;
                     else if (e.key.key == SDLK_Q)
-                        player.snapTurn(-1.0f); // turn left
+                        player.snapTurn(-1.0f);
                     else if (e.key.key == SDLK_E)
-                        player.snapTurn(1.0f); // turn right
+                        player.snapTurn(1.0f);
                     break;
                 case SDL_EVENT_WINDOW_RESIZED:
                 case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
                     renderer.onResize();
                     break;
                 case SDL_EVENT_MOUSE_BUTTON_DOWN:
-                    if (e.button.button == SDL_BUTTON_LEFT &&
-                        !ImGui::GetIO().WantCaptureMouse)
+                    if (e.button.button == SDL_BUTTON_LEFT && !ImGui::GetIO().WantCaptureMouse)
                         dragging = true;
                     break;
                 case SDL_EVENT_MOUSE_BUTTON_UP:
@@ -228,7 +433,6 @@ int main(int argc, char *argv[])
                 case SDL_EVENT_MOUSE_MOTION:
                     if (dragging)
                     {
-                        // Desktop mouse-look (no effect on HMD orientation).
                         player.addYaw(e.motion.xrel * 0.0035f);
                         player.addPitch(-e.motion.yrel * 0.0035f);
                     }
@@ -238,7 +442,6 @@ int main(int argc, char *argv[])
                 }
             }
 
-            // Advance the OpenXR session state machine.
             if (vrAvailable)
             {
                 bool exitRequested = false;
@@ -251,7 +454,6 @@ int main(int argc, char *argv[])
             const float dt = (now - prevTicks) / 1000.0f;
             prevTicks = now;
 
-            // Keyboard locomotion (WASD), shared by VR and desktop.
             const bool *ks = SDL_GetKeyboardState(nullptr);
             glm::vec2 kbMove(0.0f);
             if (ks[SDL_SCANCODE_W])
@@ -265,28 +467,56 @@ int main(int argc, char *argv[])
             if (!ImGui::GetIO().WantCaptureKeyboard)
                 player.moveLocal(kbMove, dt);
 
-            // VR frame: controller locomotion + stereo render.
+            // --- Physics step -------------------------------------------------
+            physicsAccumulator += dt;
+            while (physicsAccumulator >= PhysicsWorld::kFixedStep)
+            {
+                physicsWorld.step(PhysicsWorld::kFixedStep);
+                physicsAccumulator -= PhysicsWorld::kFixedStep;
+            }
+            // Write simulated positions back to entities (skips grabbed/static).
+            physicsWorld.syncTransforms(entities);
+
             const bool xrRunning = vrAvailable && xr.sessionRunning();
             if (xrRunning)
             {
                 xr.syncActions();
+                leftGrabGesture = xr.isGrabGesture(XrSystem::Hand::Left);
+                rightGrabGesture = xr.isGrabGesture(XrSystem::Hand::Right);
                 player.moveLocal(xr.moveInput(), dt);
                 player.snapTurn(xr.turnInput());
+
+                renderer.setDrawCalls(buildDrawCalls(true));
                 renderer.renderXrFrame(xr, player, lightDir);
 
-                // --- grab mechanic ---
-                // Returns world-space palm position; falls back to grip pose.
-                auto getHandPos = [&](XrSystem::Hand h, glm::vec3 &pos) -> bool
+                // Startup placement for first entity.
+                if (grabbedEntityIdx < 0 && xrPlacementFramesRemaining > 0)
+                {
+                    entities[0].transform.position = placeInFrontOfEye(
+                        renderer.lastEyePos, renderer.lastEyeView,
+                        kObjectSpawnDistance, kObjectSpawnVerticalOffset);
+                    --xrPlacementFramesRemaining;
+                }
+
+                // Hand pose extraction.
+                auto getHandPose = [&](XrSystem::Hand h,
+                                       glm::vec3 &pos,
+                                       glm::quat &rot) -> bool
                 {
                     const auto &jd = xr.getHandJoints(h);
                     if (jd.isTracked)
                     {
                         const auto &palm = jd.joints[XR_HAND_JOINT_PALM_EXT];
-                        if (palm.locationFlags &
-                            XR_SPACE_LOCATION_POSITION_VALID_BIT)
+                        const auto flags = palm.locationFlags;
+                        if (flags & XR_SPACE_LOCATION_POSITION_VALID_BIT)
                         {
                             pos = {palm.pose.position.x, palm.pose.position.y,
                                    palm.pose.position.z};
+                            if (flags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT)
+                                rot = glm::quat(palm.pose.orientation.w,
+                                                palm.pose.orientation.x,
+                                                palm.pose.orientation.y,
+                                                palm.pose.orientation.z);
                             return true;
                         }
                     }
@@ -294,50 +524,123 @@ int main(int argc, char *argv[])
                     const XrPosef grip = xr.handPose(h, valid);
                     if (valid)
                     {
-                        pos = {grip.position.x, grip.position.y,
-                               grip.position.z};
+                        pos = {grip.position.x, grip.position.y, grip.position.z};
+                        rot = glm::quat(grip.orientation.w, grip.orientation.x,
+                                        grip.orientation.y, grip.orientation.z);
                         return true;
                     }
                     return false;
                 };
 
-                if (!objectGrabbed)
+                // --- Grab logic -----------------------------------------------
+                if (grabbedEntityIdx < 0)
                 {
-                    using Hand = XrSystem::Hand;
-                    for (int hi = 0; hi < static_cast<int>(Hand::Count); ++hi)
+                    for (int hi = 0; hi < 2; ++hi)
                     {
-                        const auto h = static_cast<Hand>(hi);
                         glm::vec3 hpos{0.0f};
-                        if (!getHandPos(h, hpos))
+                        glm::quat hrot{1.0f, 0.0f, 0.0f, 0.0f};
+                        if (!getHandPose(static_cast<XrSystem::Hand>(hi), hpos, hrot))
                             continue;
-                        if (glm::distance(hpos, objectWorldPos) < kGrabRange &&
-                            xr.isGrabGesture(h))
+                        handIndicatorPos[hi] = hpos;
+                        handIndicatorRot[hi] = hrot;
+                        handIndicatorValid[hi] = true;
+                        if (hands.enabled)
+                            physicsWorld.moveKinematic(handPhysicsBody[hi], hpos, hrot);
+
+                        if (!xr.isGrabGesture(static_cast<XrSystem::Hand>(hi)))
+                            continue;
+
+                        // Find nearest grabbable entity.
+                        for (int ei = 0; ei < static_cast<int>(kLeftHandIdx); ++ei)
                         {
-                            objectGrabbed = true;
-                            grabbingHand = h;
-                            grabHandOffset = objectWorldPos - hpos;
-                            break;
+                            if (!entities[ei].grabbable)
+                                continue;
+                            if (glm::distance(hpos, entities[ei].transform.position) < kGrabRange)
+                            {
+                                grabbedEntityIdx = ei;
+                                grabbingHandIdx = hi;
+                                grabHandOffset = entities[ei].transform.position - hpos;
+                                // Switch to kinematic if physics-driven.
+                                if (entities[ei].physicsBody)
+                                {
+                                    auto *body = static_cast<btRigidBody *>(entities[ei].physicsBody);
+                                    body->setCollisionFlags(
+                                        body->getCollisionFlags() |
+                                        btCollisionObject::CF_KINEMATIC_OBJECT);
+                                    body->clearForces();
+                                    btVector3 zero(0, 0, 0);
+                                    body->setLinearVelocity(zero);
+                                    body->setAngularVelocity(zero);
+                                }
+                                break;
+                            }
                         }
+                        if (grabbedEntityIdx >= 0)
+                            break;
                     }
                 }
                 else
                 {
                     glm::vec3 hpos{0.0f};
-                    if (!getHandPos(grabbingHand, hpos) ||
-                        !xr.isGrabGesture(grabbingHand))
+                    glm::quat hrot{1.0f, 0.0f, 0.0f, 0.0f};
+                    const bool stillGrabbing =
+                        getHandPose(static_cast<XrSystem::Hand>(grabbingHandIdx), hpos, hrot) &&
+                        xr.isGrabGesture(static_cast<XrSystem::Hand>(grabbingHandIdx));
+                    if (!stillGrabbing)
                     {
-                        objectGrabbed = false;
+                        // Release: restore dynamic if applicable.
+                        auto &ent = entities[grabbedEntityIdx];
+                        if (ent.physicsBody)
+                        {
+                            auto *body = static_cast<btRigidBody *>(ent.physicsBody);
+                            body->setCollisionFlags(
+                                body->getCollisionFlags() &
+                                ~btCollisionObject::CF_KINEMATIC_OBJECT);
+                            body->activate(true);
+                        }
+                        grabbedEntityIdx = -1;
+                        grabbingHandIdx = -1;
                     }
                     else
                     {
-                        objectWorldPos = hpos + grabHandOffset;
-                        renderer.setObjectTransform(
-                            placeModelAt(objectWorldPos, objectScale,
-                                         model.center));
+                        entities[grabbedEntityIdx].transform.position =
+                            hpos + grabHandOffset;
+                        if (entities[grabbedEntityIdx].physicsBody)
+                            physicsWorld.moveKinematic(
+                                entities[grabbedEntityIdx].physicsBody, hpos + grabHandOffset,
+                                entities[grabbedEntityIdx].transform.rotation);
+                        handIndicatorPos[grabbingHandIdx] = hpos;
+                        handIndicatorRot[grabbingHandIdx] = hrot;
+                    }
+                }
+
+                // Refresh hand indicators.
+                for (int hi = 0; hi < 2; ++hi)
+                {
+                    if (hi == grabbingHandIdx)
+                        continue;
+                    glm::vec3 hpos{0.0f};
+                    glm::quat hrot{1.0f, 0.0f, 0.0f, 0.0f};
+                    handIndicatorValid[hi] =
+                        getHandPose(static_cast<XrSystem::Hand>(hi), hpos, hrot);
+                    if (handIndicatorValid[hi])
+                    {
+                        handIndicatorPos[hi] = hpos;
+                        handIndicatorRot[hi] = hrot;
+                        if (hands.enabled)
+                            physicsWorld.moveKinematic(handPhysicsBody[hi], hpos, hrot);
                     }
                 }
             }
+            else
+            {
+                leftGrabGesture = rightGrabGesture = false;
+                handIndicatorValid = {false, false};
+            }
 
+            renderer.setDrawCalls(buildDrawCalls(xrRunning));
+
+            // --- ImGui --------------------------------------------------------
             ImGui_ImplVulkan_NewFrame();
             ImGui_ImplSDL3_NewFrame();
             ImGui::NewFrame();
@@ -346,13 +649,11 @@ int main(int argc, char *argv[])
             ImGui::Text("Mode: %s", xrRunning ? "VR (OpenXR)"
                                               : (vrAvailable ? "VR (waiting)"
                                                              : "Desktop"));
-
             ImGui::SeparatorText("Rendering");
             const char *msaaLabels[std::size(msaaOptions) + 1]{};
             for (int i = 0; i < msaaOptionCount; ++i)
                 msaaLabels[i] = msaaOptions[i].label;
-            if (ImGui::Combo("Anti-Aliasing", &msaaSelected, msaaLabels,
-                             msaaOptionCount))
+            if (ImGui::Combo("Anti-Aliasing", &msaaSelected, msaaLabels, msaaOptionCount))
                 pendingMsaa = msaaOptions[msaaSelected].count;
 
             ImGui::SeparatorText("Mesh / LOD");
@@ -360,31 +661,56 @@ int main(int argc, char *argv[])
             ImGui::SliderFloat("Error", &lodError, 0.0f, 0.20f, "%.2f");
             if (ImGui::Button("Apply LOD"))
                 pendingLod = true;
-            ImGui::Text("Tris: %zu -> %u", model.indices.size() / 3,
+            ImGui::Text("Tris: %zu -> %u", models[0].indices.size() / 3,
                         renderer.getIndexCount() / 3);
 
             ImGui::SeparatorText("Player");
             ImGui::Text("Pos: %.2f %.2f %.2f", player.position.x,
                         player.position.y, player.position.z);
 
+            // Per-entity transform UI.
+            for (size_t i = 0; i < kLeftHandIdx; ++i)
+            {
+                auto &ent = entities[i];
+                ImGui::PushID(static_cast<int>(i));
+                const std::string label = "Object: " + ent.id;
+                ImGui::SeparatorText(label.c_str());
+                glm::vec3 p = ent.transform.position;
+                if (ImGui::DragFloat3("Position", &p.x, 0.01f))
+                    ent.transform.position = p;
+                glm::vec3 euler = glm::degrees(glm::eulerAngles(ent.transform.rotation));
+                if (ImGui::DragFloat3("Rotation (deg)", &euler.x, 0.5f))
+                    ent.transform.rotation = glm::quat(glm::radians(euler));
+                glm::vec3 sc = ent.transform.scale;
+                if (ImGui::DragFloat3("Scale", &sc.x, 0.01f, 0.01f, 10.0f))
+                    ent.transform.scale = sc;
+                if (ent.rigidbody)
+                {
+                    ImGui::Text("Physics: %s",
+                                ent.rigidbody->bodyType == BodyType::Dynamic ? "dynamic" : ent.rigidbody->bodyType == BodyType::Kinematic ? "kinematic"
+                                                                                                                                          : "static");
+                }
+                ImGui::PopID();
+            }
+
+            ImGui::Checkbox("Show hand indicators", &showHandIndicators);
+
             if (xrRunning)
             {
                 ImGui::SeparatorText("Grab");
                 ImGui::Text("Hand tracking: %s",
                             xr.handTrackingAvailable() ? "yes" : "no");
+                ImGui::Text("Left gesture:  %s", leftGrabGesture ? "yes" : "no");
+                ImGui::Text("Right gesture: %s", rightGrabGesture ? "yes" : "no");
                 ImGui::Text("Grabbed: %s",
-                            objectGrabbed
-                                ? (grabbingHand == XrSystem::Hand::Left
-                                       ? "left hand"
-                                       : "right hand")
-                                : "no");
+                            grabbedEntityIdx >= 0
+                                ? entities[grabbedEntityIdx].id.c_str()
+                                : "none");
             }
 
             ImGui::End();
             ImGui::Render();
 
-            // Desktop window: mirror the left eye while in VR, otherwise a
-            // free-look FPS view.
             glm::mat4 view, proj;
             glm::vec3 camPos;
             if (xrRunning)
@@ -397,8 +723,7 @@ int main(int argc, char *argv[])
             {
                 int w = 0, h = 0;
                 SDL_GetWindowSizeInPixels(window, &w, &h);
-                float aspect =
-                    h > 0 ? static_cast<float>(w) / static_cast<float>(h) : 1.0f;
+                float aspect = h > 0 ? static_cast<float>(w) / h : 1.0f;
                 view = player.eyeView();
                 proj = desktopProj(aspect);
                 camPos = player.eyePosition();
